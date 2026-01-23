@@ -30,14 +30,16 @@ func NewVideoProcessor(cfg *config.Config, logger zerolog.Logger) *VideoProcesso
 
 // VideoInfo contains metadata about a video file
 type VideoInfo struct {
-	Width      int     `json:"width"`
-	Height     int     `json:"height"`
-	Duration   float64 `json:"duration"`
-	Bitrate    int64   `json:"bitrate"`
-	Codec      string  `json:"codec"`
-	FrameRate  float64 `json:"frame_rate"`
-	HasAudio   bool    `json:"has_audio"`
-	AudioCodec string  `json:"audio_codec,omitempty"`
+	Width        int     `json:"width"`
+	Height       int     `json:"height"`
+	Duration     float64 `json:"duration"`
+	Bitrate      int64   `json:"bitrate"`
+	Codec        string  `json:"codec"`
+	FrameRate    float64 `json:"frame_rate"`
+	HasAudio     bool    `json:"has_audio"`
+	AudioCodec   string  `json:"audio_codec,omitempty"`
+	IsInterlaced bool    `json:"is_interlaced"`
+	FieldOrder   string  `json:"field_order,omitempty"` // "tt", "bb", "tb", "bt", or "progressive"
 }
 
 // ProcessResult contains the results of video processing
@@ -70,6 +72,7 @@ func (p *VideoProcessor) GetVideoInfo(ctx context.Context, inputPath string) (*V
 			Width      int    `json:"width"`
 			Height     int    `json:"height"`
 			RFrameRate string `json:"r_frame_rate"`
+			FieldOrder string `json:"field_order"` // "progressive", "tt", "bb", "tb", "bt", or empty
 		} `json:"streams"`
 		Format struct {
 			Duration string `json:"duration"`
@@ -97,6 +100,9 @@ func (p *VideoProcessor) GetVideoInfo(ctx context.Context, inputPath string) (*V
 					info.FrameRate = num / den
 				}
 			}
+			// Check for interlacing
+			info.FieldOrder = stream.FieldOrder
+			info.IsInterlaced = isInterlacedFieldOrder(stream.FieldOrder)
 		} else if stream.CodecType == "audio" {
 			info.HasAudio = true
 			info.AudioCodec = stream.CodecName
@@ -114,6 +120,18 @@ func (p *VideoProcessor) GetVideoInfo(ctx context.Context, inputPath string) (*V
 	return info, nil
 }
 
+// isInterlacedFieldOrder checks if the field_order indicates interlaced content
+func isInterlacedFieldOrder(fieldOrder string) bool {
+	switch fieldOrder {
+	case "tt", "tb", "bt", "bb": // top-top, top-bottom, bottom-top, bottom-bottom
+		return true
+	case "progressive", "":
+		return false
+	default:
+		return false
+	}
+}
+
 // Process transcodes a video file to an optimized format
 func (p *VideoProcessor) Process(ctx context.Context, inputPath, outputDir string) (*ProcessResult, error) {
 	// Get video info first
@@ -127,6 +145,8 @@ func (p *VideoProcessor) Process(ctx context.Context, inputPath, outputDir strin
 		Int("width", info.Width).
 		Int("height", info.Height).
 		Float64("duration", info.Duration).
+		Bool("interlaced", info.IsInterlaced).
+		Str("field_order", info.FieldOrder).
 		Msg("processing video")
 
 	// Generate output filename with _optimized suffix to ensure uniqueness
@@ -138,7 +158,7 @@ func (p *VideoProcessor) Process(ctx context.Context, inputPath, outputDir strin
 	targetWidth, targetHeight := p.calculateTargetDimensions(info.Width, info.Height)
 
 	// Build ffmpeg arguments for transcoding
-	args := p.buildTranscodeArgs(inputPath, outputPath, targetWidth, targetHeight, info.HasAudio)
+	args := p.buildTranscodeArgs(inputPath, outputPath, targetWidth, targetHeight, info.HasAudio, info.IsInterlaced)
 
 	p.logger.Debug().Strs("args", args).Msg("running ffmpeg transcode")
 
@@ -148,8 +168,8 @@ func (p *VideoProcessor) Process(ctx context.Context, inputPath, outputDir strin
 		return nil, fmt.Errorf("ffmpeg transcode failed: %w", err)
 	}
 
-	// Generate thumbnail
-	if err := p.generateThumbnail(ctx, inputPath, thumbnailPath, info.Duration); err != nil {
+	// Generate thumbnail (use deinterlaced frame if source is interlaced)
+	if err := p.generateThumbnail(ctx, inputPath, thumbnailPath, info.Duration, info.IsInterlaced); err != nil {
 		p.logger.Warn().Err(err).Msg("failed to generate thumbnail, continuing without it")
 		thumbnailPath = ""
 	}
@@ -188,14 +208,31 @@ func (p *VideoProcessor) calculateTargetDimensions(width, height int) (int, int)
 }
 
 // buildTranscodeArgs builds the ffmpeg arguments for transcoding
-func (p *VideoProcessor) buildTranscodeArgs(input, output string, width, height int, hasAudio bool) []string {
+func (p *VideoProcessor) buildTranscodeArgs(input, output string, width, height int, hasAudio, isInterlaced bool) []string {
+	// Build video filter chain
+	var filters []string
+
+	// Add deinterlacing filter first if needed (before scaling)
+	// Using yadif (Yet Another DeInterlacing Filter) which is good quality and reasonably fast
+	// mode=1 means output one frame for each field (doubles framerate for smoother motion)
+	// mode=0 would output one frame for each frame (keeps original framerate)
+	if isInterlaced {
+		filters = append(filters, "yadif=mode=0:parity=-1:deint=1")
+	}
+
+	// Add scaling filter
+	filters = append(filters, fmt.Sprintf("scale=%d:%d", width, height))
+
+	// Combine filters with comma separator
+	filterChain := strings.Join(filters, ",")
+
 	args := []string{
 		"-y",                  // Overwrite output
 		"-i", input,           // Input file
 		"-c:v", p.cfg.VideoCodec,
 		"-preset", p.cfg.VideoPreset,
 		"-crf", p.cfg.VideoCRF,
-		"-vf", fmt.Sprintf("scale=%d:%d", width, height),
+		"-vf", filterChain,
 		"-movflags", "+faststart", // Enable streaming
 		"-pix_fmt", "yuv420p",     // Compatibility
 	}
@@ -214,7 +251,7 @@ func (p *VideoProcessor) buildTranscodeArgs(input, output string, width, height 
 }
 
 // generateThumbnail creates a thumbnail from the video
-func (p *VideoProcessor) generateThumbnail(ctx context.Context, input, output string, duration float64) error {
+func (p *VideoProcessor) generateThumbnail(ctx context.Context, input, output string, duration float64, isInterlaced bool) error {
 	// Take thumbnail from 10% into the video, or at 1 second for short videos
 	seekTime := duration * 0.1
 	if seekTime < 1 {
@@ -224,13 +261,22 @@ func (p *VideoProcessor) generateThumbnail(ctx context.Context, input, output st
 		seekTime = 0
 	}
 
+	// Build filter chain for thumbnail
+	var filters []string
+	if isInterlaced {
+		// Deinterlace the frame to avoid combing artifacts in thumbnail
+		filters = append(filters, "yadif=mode=0:parity=-1:deint=1")
+	}
+	filters = append(filters, fmt.Sprintf("scale=%d:-1", p.cfg.ImageMaxWidth/2)) // Half size for thumbnails
+	filterChain := strings.Join(filters, ",")
+
 	args := []string{
 		"-y",
 		"-ss", fmt.Sprintf("%.2f", seekTime),
 		"-i", input,
 		"-vframes", "1",
 		"-q:v", "2",
-		"-vf", fmt.Sprintf("scale=%d:-1", p.cfg.ImageMaxWidth/2), // Half size for thumbnails
+		"-vf", filterChain,
 		output,
 	}
 
