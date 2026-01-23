@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lowreyarchives
+  labels:
+    app.kubernetes.io/name: lowreyarchives
+    app.kubernetes.io/component: media-processor

@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: media-processor-temp
+  namespace: lowreyarchives
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      # Adjust based on expected concurrent processing volume
+      # Should be large enough to hold multiple video files being processed
+      storage: 50Gi
+  storageClassName: local-path  # k3s default storage class

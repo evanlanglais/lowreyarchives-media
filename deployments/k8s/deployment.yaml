@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: media-processor
+  namespace: lowreyarchives
+  labels:
+    app.kubernetes.io/name: media-processor
+    app.kubernetes.io/component: worker
+spec:
+  # Single replica recommended to avoid processing conflicts
+  # Scale by adjusting WORKER_COUNT instead
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: media-processor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: media-processor
+        app.kubernetes.io/component: worker
+    spec:
+      serviceAccountName: media-processor
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: processor
+          image: lowreyarchives/media-processor:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: health
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: media-processor-config
+            - secretRef:
+                name: media-processor-secrets
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              # Video processing is CPU intensive
+              cpu: "4000m"
+              memory: "4Gi"
+          volumeMounts:
+            - name: temp-storage
+              mountPath: /data/processing
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: temp-storage
+          persistentVolumeClaim:
+            claimName: media-processor-temp
+      # Tolerate node restarts gracefully
+      terminationGracePeriodSeconds: 300
