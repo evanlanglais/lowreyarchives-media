@@ -110,3 +110,17 @@ func (r *MediaRepository) GetEventIDForMedia(ctx context.Context, mediaID int64)
 	}
 	return &eventID, nil
 }
+
+// ExistsWithIngestPath checks if a media record exists with the given ingest path
+func (r *MediaRepository) ExistsWithIngestPath(ctx context.Context, ingestPath string) (bool, error) {
+	var exists bool
+	err := r.db.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM media WHERE media_url = $1)`,
+		ingestPath,
+	).Scan(&exists)
+
+	if err != nil {
+		return false, fmt.Errorf("failed to check media existence: %w", err)
+	}
+	return exists, nil
+}

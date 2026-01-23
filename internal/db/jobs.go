@@ -45,7 +45,7 @@ func (r *JobRepository) GetByID(ctx context.Context, id int64) (*models.Processi
 		SELECT id, media_id, event_id, job_type, status, ingest_path,
 			   archive_path, optimized_path, thumbnail_path, retry_count,
 			   error_message, worker_id, created_at, updated_at,
-			   started_at, completed_at, processing_details
+			   started_at, completed_at, processing_details, last_heartbeat
 		FROM processing_jobs WHERE id = $1`
 
 	job := &models.ProcessingJob{}
@@ -53,7 +53,7 @@ func (r *JobRepository) GetByID(ctx context.Context, id int64) (*models.Processi
 		&job.ID, &job.MediaID, &job.EventID, &job.JobType, &job.Status, &job.IngestPath,
 		&job.ArchivePath, &job.OptimizedPath, &job.ThumbnailPath, &job.RetryCount,
 		&job.ErrorMessage, &job.WorkerID, &job.CreatedAt, &job.UpdatedAt,
-		&job.StartedAt, &job.CompletedAt, &job.ProcessingDetails,
+		&job.StartedAt, &job.CompletedAt, &job.ProcessingDetails, &job.LastHeartbeat,
 	)
 
 	if err == pgx.ErrNoRows {
@@ -70,7 +70,7 @@ func (r *JobRepository) GetByID(ctx context.Context, id int64) (*models.Processi
 func (r *JobRepository) ClaimPendingJob(ctx context.Context, workerID string) (*models.ProcessingJob, error) {
 	query := `
 		UPDATE processing_jobs
-		SET status = $1, worker_id = $2, started_at = $3, updated_at = $3
+		SET status = $1, worker_id = $2, started_at = $3, updated_at = $3, last_heartbeat = $3
 		WHERE id = (
 			SELECT id FROM processing_jobs
 			WHERE status = $4 OR (status = $5 AND retry_count < 3)
@@ -81,7 +81,7 @@ func (r *JobRepository) ClaimPendingJob(ctx context.Context, workerID string) (*
 		RETURNING id, media_id, event_id, job_type, status, ingest_path,
 				  archive_path, optimized_path, thumbnail_path, retry_count,
 				  error_message, worker_id, created_at, updated_at,
-				  started_at, completed_at, processing_details`
+				  started_at, completed_at, processing_details, last_heartbeat`
 
 	now := time.Now()
 	job := &models.ProcessingJob{}
@@ -92,7 +92,7 @@ func (r *JobRepository) ClaimPendingJob(ctx context.Context, workerID string) (*
 		&job.ID, &job.MediaID, &job.EventID, &job.JobType, &job.Status, &job.IngestPath,
 		&job.ArchivePath, &job.OptimizedPath, &job.ThumbnailPath, &job.RetryCount,
 		&job.ErrorMessage, &job.WorkerID, &job.CreatedAt, &job.UpdatedAt,
-		&job.StartedAt, &job.CompletedAt, &job.ProcessingDetails,
+		&job.StartedAt, &job.CompletedAt, &job.ProcessingDetails, &job.LastHeartbeat,
 	)
 
 	if err == pgx.ErrNoRows {
@@ -169,16 +169,30 @@ func (r *JobRepository) GetPendingCount(ctx context.Context) (int, error) {
 	return count, nil
 }
 
-// GetStaleJobs finds jobs that have been processing for too long
+// UpdateHeartbeat updates the last_heartbeat timestamp for a job
+// This signals that the worker is still actively processing
+func (r *JobRepository) UpdateHeartbeat(ctx context.Context, jobID int64) error {
+	_, err := r.db.pool.Exec(ctx,
+		"UPDATE processing_jobs SET last_heartbeat = $1 WHERE id = $2",
+		time.Now(), jobID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update heartbeat: %w", err)
+	}
+	return nil
+}
+
+// GetStaleJobs finds jobs that have stopped sending heartbeats
+// A job is considered stale if its last_heartbeat is older than the timeout
 func (r *JobRepository) GetStaleJobs(ctx context.Context, timeout time.Duration) ([]*models.ProcessingJob, error) {
 	cutoff := time.Now().Add(-timeout)
 	query := `
 		SELECT id, media_id, event_id, job_type, status, ingest_path,
 			   archive_path, optimized_path, thumbnail_path, retry_count,
 			   error_message, worker_id, created_at, updated_at,
-			   started_at, completed_at, processing_details
+			   started_at, completed_at, processing_details, last_heartbeat
 		FROM processing_jobs
-		WHERE status = $1 AND started_at < $2`
+		WHERE status = $1 AND (last_heartbeat IS NULL OR last_heartbeat < $2)`
 
 	rows, err := r.db.pool.Query(ctx, query, models.JobStatusProcessing, cutoff)
 	if err != nil {
@@ -193,7 +207,7 @@ func (r *JobRepository) GetStaleJobs(ctx context.Context, timeout time.Duration)
 			&job.ID, &job.MediaID, &job.EventID, &job.JobType, &job.Status, &job.IngestPath,
 			&job.ArchivePath, &job.OptimizedPath, &job.ThumbnailPath, &job.RetryCount,
 			&job.ErrorMessage, &job.WorkerID, &job.CreatedAt, &job.UpdatedAt,
-			&job.StartedAt, &job.CompletedAt, &job.ProcessingDetails,
+			&job.StartedAt, &job.CompletedAt, &job.ProcessingDetails, &job.LastHeartbeat,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan stale job: %w", err)
@@ -204,14 +218,16 @@ func (r *JobRepository) GetStaleJobs(ctx context.Context, timeout time.Duration)
 }
 
 // ResetStaleJob resets a stale job to pending status
+// Does NOT increment retry_count since heartbeat timeouts are not processing failures
+// (could be user cancellation, system restart, network issues, etc.)
 func (r *JobRepository) ResetStaleJob(ctx context.Context, jobID int64) error {
 	query := `
 		UPDATE processing_jobs
 		SET status = $1, worker_id = NULL, started_at = NULL,
-			updated_at = $2, retry_count = retry_count + 1
+			updated_at = $2, last_heartbeat = NULL
 		WHERE id = $3`
 
-	_, err := r.db.pool.Exec(ctx, query, models.JobStatusRetrying, time.Now(), jobID)
+	_, err := r.db.pool.Exec(ctx, query, models.JobStatusPending, time.Now(), jobID)
 	if err != nil {
 		return fmt.Errorf("failed to reset stale job: %w", err)
 	}

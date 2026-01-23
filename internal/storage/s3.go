@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/lowreyarchives/media-processor/internal/config"
 	"github.com/minio/minio-go/v7"
@@ -60,6 +61,7 @@ func (s *S3Client) Download(ctx context.Context, key string) (io.ReadCloser, err
 }
 
 // UploadToMedia uploads a processed file to the media bucket
+// For large files, use UploadFileToMedia instead which handles multipart automatically
 func (s *S3Client) UploadToMedia(ctx context.Context, key string, body io.Reader, contentType string) error {
 	_, err := s.client.PutObject(ctx, s.mediaBucket, key, body, -1, minio.PutObjectOptions{
 		ContentType: contentType,
@@ -70,24 +72,63 @@ func (s *S3Client) UploadToMedia(ctx context.Context, key string, body io.Reader
 	return nil
 }
 
+// UploadFileToMedia uploads a file from disk to the media bucket
+// Uses FPutObject which automatically handles multipart uploads for large files
+func (s *S3Client) UploadFileToMedia(ctx context.Context, key string, filePath string, contentType string) error {
+	_, err := s.client.FPutObject(ctx, s.mediaBucket, key, filePath, minio.PutObjectOptions{
+		ContentType: contentType,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to upload file to media bucket: %w", err)
+	}
+	return nil
+}
+
 // ArchiveOriginal moves the original file to the archive path in the media bucket
+// Uses ComposeObject for server-side copy which handles files of any size
 func (s *S3Client) ArchiveOriginal(ctx context.Context, ingestKey string) (string, error) {
 	// Construct archive path: archive/{original_filename}
 	filename := path.Base(ingestKey)
 	archiveKey := path.Join(s.archivePath, filename)
 
-	// Copy from ingest to archive
-	src := minio.CopySrcOptions{
-		Bucket: s.ingestBucket,
-		Object: ingestKey,
-	}
-	dst := minio.CopyDestOptions{
-		Bucket: s.mediaBucket,
-		Object: archiveKey,
-	}
-	_, err := s.client.CopyObject(ctx, dst, src)
+	// Get source object info to check size
+	srcInfo, err := s.client.StatObject(ctx, s.ingestBucket, ingestKey, minio.StatObjectOptions{})
 	if err != nil {
-		return "", fmt.Errorf("failed to archive original: %w", err)
+		return "", fmt.Errorf("failed to stat source object: %w", err)
+	}
+
+	// For files <= 5GB, use simple CopyObject (more efficient)
+	// For files > 5GB, use ComposeObject which handles multipart copy
+	const maxSingleCopySize = 5 * 1024 * 1024 * 1024 // 5GB
+
+	if srcInfo.Size <= maxSingleCopySize {
+		// Simple copy for smaller files
+		src := minio.CopySrcOptions{
+			Bucket: s.ingestBucket,
+			Object: ingestKey,
+		}
+		dst := minio.CopyDestOptions{
+			Bucket: s.mediaBucket,
+			Object: archiveKey,
+		}
+		_, err := s.client.CopyObject(ctx, dst, src)
+		if err != nil {
+			return "", fmt.Errorf("failed to archive original: %w", err)
+		}
+	} else {
+		// Use ComposeObject for large files (handles multipart copy internally)
+		src := minio.CopySrcOptions{
+			Bucket: s.ingestBucket,
+			Object: ingestKey,
+		}
+		dst := minio.CopyDestOptions{
+			Bucket: s.mediaBucket,
+			Object: archiveKey,
+		}
+		_, err := s.client.ComposeObject(ctx, dst, src)
+		if err != nil {
+			return "", fmt.Errorf("failed to archive large original: %w", err)
+		}
 	}
 
 	return archiveKey, nil
@@ -133,6 +174,36 @@ func (s *S3Client) ListIngestObjects(ctx context.Context, prefix string) ([]stri
 	}
 
 	return keys, nil
+}
+
+// IngestObject represents an object in the ingest bucket with metadata
+type IngestObject struct {
+	Key          string
+	Size         int64
+	LastModified time.Time
+}
+
+// ListIngestObjectsWithInfo lists objects in the ingest bucket with metadata
+func (s *S3Client) ListIngestObjectsWithInfo(ctx context.Context, prefix string) ([]IngestObject, error) {
+	var objects []IngestObject
+
+	objectCh := s.client.ListObjects(ctx, s.ingestBucket, minio.ListObjectsOptions{
+		Prefix:    prefix,
+		Recursive: true,
+	})
+
+	for obj := range objectCh {
+		if obj.Err != nil {
+			return nil, fmt.Errorf("failed to list objects: %w", obj.Err)
+		}
+		objects = append(objects, IngestObject{
+			Key:          obj.Key,
+			Size:         obj.Size,
+			LastModified: obj.LastModified,
+		})
+	}
+
+	return objects, nil
 }
 
 // ObjectInfo contains metadata about an S3 object

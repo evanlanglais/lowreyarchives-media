@@ -42,6 +42,7 @@ type ProcessingJob struct {
 	StartedAt         *time.Time `db:"started_at" json:"started_at,omitempty"`
 	CompletedAt       *time.Time `db:"completed_at" json:"completed_at,omitempty"`
 	ProcessingDetails *string    `db:"processing_details" json:"processing_details,omitempty"`
+	LastHeartbeat     *time.Time `db:"last_heartbeat" json:"last_heartbeat,omitempty"`
 }
 
 // NewProcessingJob creates a new processing job with default values

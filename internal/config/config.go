@@ -26,6 +26,17 @@ type Config struct {
 	MaxRetries        int `envconfig:"MAX_RETRIES" default:"3"`
 	ProcessingTimeout int `envconfig:"PROCESSING_TIMEOUT_SEC" default:"3600"`
 
+	// Orphan Cleanup Configuration
+	// Files in ingest bucket older than this with no media record will be deleted
+	OrphanCleanupAgeSec int  `envconfig:"ORPHAN_CLEANUP_AGE_SEC" default:"3600"`
+	OrphanCleanupEnable bool `envconfig:"ORPHAN_CLEANUP_ENABLE" default:"true"`
+
+	// Worker Heartbeat Configuration
+	// Workers send heartbeats while processing to prove they're still alive
+	HeartbeatIntervalSec int `envconfig:"HEARTBEAT_INTERVAL_SEC" default:"30"`
+	// Jobs without a heartbeat for this long are considered stale (should be > HeartbeatIntervalSec)
+	HeartbeatTimeoutSec int `envconfig:"HEARTBEAT_TIMEOUT_SEC" default:"120"`
+
 	// FFmpeg Configuration
 	FFmpegPath         string `envconfig:"FFMPEG_PATH" default:"ffmpeg"`
 	FFprobePath        string `envconfig:"FFPROBE_PATH" default:"ffprobe"`

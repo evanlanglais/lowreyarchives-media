@@ -116,12 +116,44 @@ func (w *Worker) processNextJob(ctx context.Context) error {
 	}
 	defer os.RemoveAll(jobDir)
 
+	// Start heartbeat goroutine to signal we're still alive
+	heartbeatCtx, cancelHeartbeat := context.WithCancel(ctx)
+	heartbeatDone := make(chan struct{})
+	go w.sendHeartbeats(heartbeatCtx, job.ID, heartbeatDone)
+
 	// Process the job
-	if err := w.processJob(ctx, job, jobDir); err != nil {
+	err = w.processJob(ctx, job, jobDir)
+
+	// Stop heartbeat goroutine
+	cancelHeartbeat()
+	<-heartbeatDone
+
+	if err != nil {
 		return w.handleJobError(ctx, job, err)
 	}
 
 	return nil
+}
+
+// sendHeartbeats periodically updates the job's heartbeat timestamp
+func (w *Worker) sendHeartbeats(ctx context.Context, jobID int64, done chan<- struct{}) {
+	defer close(done)
+
+	ticker := time.NewTicker(time.Duration(w.cfg.HeartbeatIntervalSec) * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := w.jobRepo.UpdateHeartbeat(context.Background(), jobID); err != nil {
+				w.logger.Warn().Err(err).Int64("job_id", jobID).Msg("failed to update heartbeat")
+			} else {
+				w.logger.Debug().Int64("job_id", jobID).Msg("heartbeat sent")
+			}
+		}
+	}
 }
 
 // processJob handles the full processing pipeline for a job
@@ -379,13 +411,8 @@ func (w *Worker) downloadFile(ctx context.Context, key string, destDir string) (
 }
 
 // uploadProcessedFile uploads a processed file to the media bucket
+// Uses FPutObject internally which handles multipart uploads for large files
 func (w *Worker) uploadProcessedFile(ctx context.Context, localPath, prefix string) (string, error) {
-	file, err := os.Open(localPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to open file: %w", err)
-	}
-	defer file.Close()
-
 	// Generate S3 key: {prefix}/{filename}
 	filename := filepath.Base(localPath)
 	s3Key := fmt.Sprintf("%s/%s", prefix, filename)
@@ -406,7 +433,7 @@ func (w *Worker) uploadProcessedFile(ctx context.Context, localPath, prefix stri
 		contentType = "image/webp"
 	}
 
-	if err := w.s3Client.UploadToMedia(ctx, s3Key, file, contentType); err != nil {
+	if err := w.s3Client.UploadFileToMedia(ctx, s3Key, localPath, contentType); err != nil {
 		return "", err
 	}
 
