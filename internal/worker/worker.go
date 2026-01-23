@@ -25,6 +25,7 @@ type Worker struct {
 	cfg            *config.Config
 	jobRepo        *db.JobRepository
 	mediaRepo      *db.MediaRepository
+	variantRepo    *db.VariantRepository
 	s3Client       *storage.S3Client
 	videoProcessor *processor.VideoProcessor
 	imageProcessor *processor.ImageProcessor
@@ -37,6 +38,7 @@ func NewWorker(
 	cfg *config.Config,
 	jobRepo *db.JobRepository,
 	mediaRepo *db.MediaRepository,
+	variantRepo *db.VariantRepository,
 	s3Client *storage.S3Client,
 	logger zerolog.Logger,
 ) (*Worker, error) {
@@ -53,6 +55,7 @@ func NewWorker(
 		cfg:            cfg,
 		jobRepo:        jobRepo,
 		mediaRepo:      mediaRepo,
+		variantRepo:    variantRepo,
 		s3Client:       s3Client,
 		videoProcessor: processor.NewVideoProcessor(cfg, logger),
 		imageProcessor: processor.NewImageProcessor(cfg, logger),
@@ -101,6 +104,11 @@ func (w *Worker) processNextJob(ctx context.Context) error {
 		Str("job_type", string(job.JobType)).
 		Msg("processing job")
 
+	// Update media status to processing
+	if err := w.mediaRepo.UpdateStatus(ctx, job.MediaID, models.MediaStatusProcessing); err != nil {
+		w.logger.Warn().Err(err).Int64("media_id", job.MediaID).Msg("failed to update media status to processing")
+	}
+
 	// Create job-specific directory
 	jobDir := filepath.Join(w.workDir, fmt.Sprintf("job-%d", job.ID))
 	if err := os.MkdirAll(jobDir, 0755); err != nil {
@@ -124,9 +132,19 @@ func (w *Worker) processJob(ctx context.Context, job *models.ProcessingJob, jobD
 		return fmt.Errorf("download failed: %w", err)
 	}
 
+	// Get original file size
+	originalFileInfo, err := os.Stat(localPath)
+	if err != nil {
+		return fmt.Errorf("failed to stat original file: %w", err)
+	}
+	originalFileSize := originalFileInfo.Size()
+
 	// Step 2: Process based on job type
 	var optimizedPath, thumbnailPath string
 	var processingDetails interface{}
+	var width, height int
+	var duration float64
+	var mimeType string
 
 	switch job.JobType {
 	case models.JobTypeVideo:
@@ -137,6 +155,12 @@ func (w *Worker) processJob(ctx context.Context, job *models.ProcessingJob, jobD
 		optimizedPath = result.OptimizedPath
 		thumbnailPath = result.ThumbnailPath
 		processingDetails = result.Info
+		if result.Info != nil {
+			width = result.Info.Width
+			height = result.Info.Height
+			duration = result.Info.Duration
+		}
+		mimeType = "video/mp4"
 
 	case models.JobTypePhoto:
 		result, err := w.imageProcessor.Process(ctx, localPath, jobDir)
@@ -146,9 +170,30 @@ func (w *Worker) processJob(ctx context.Context, job *models.ProcessingJob, jobD
 		optimizedPath = result.OptimizedPath
 		thumbnailPath = result.ThumbnailPath
 		processingDetails = result.Info
+		if result.Info != nil {
+			width = result.Info.Width
+			height = result.Info.Height
+		}
+		mimeType = "image/jpeg"
 
 	default:
 		return fmt.Errorf("unknown job type: %s", job.JobType)
+	}
+
+	// Get optimized file size
+	var optimizedFileSize int64
+	if optimizedPath != "" {
+		if info, err := os.Stat(optimizedPath); err == nil {
+			optimizedFileSize = info.Size()
+		}
+	}
+
+	// Get thumbnail file size
+	var thumbnailFileSize int64
+	if thumbnailPath != "" {
+		if info, err := os.Stat(thumbnailPath); err == nil {
+			thumbnailFileSize = info.Size()
+		}
 	}
 
 	// Step 3: Archive original file
@@ -172,7 +217,23 @@ func (w *Worker) processJob(ctx context.Context, job *models.ProcessingJob, jobD
 		}
 	}
 
-	// Step 6: Update media entry with new URL
+	// Step 6: Insert media variants
+	mediaBucket := w.s3Client.GetMediaBucket()
+	variants := w.buildMediaVariants(
+		job.MediaID, mediaBucket,
+		archivePath, optimizedS3Key, thumbnailS3Key,
+		originalFileSize, optimizedFileSize, thumbnailFileSize,
+		width, height, duration, mimeType,
+	)
+
+	if err := w.variantRepo.UpsertMediaVariants(ctx, variants); err != nil {
+		w.logger.Error().Err(err).Int64("media_id", job.MediaID).Msg("failed to upsert media variants")
+		// Don't fail the job for variant insert errors - the core processing succeeded
+	} else {
+		w.logger.Info().Int64("media_id", job.MediaID).Int("variant_count", len(variants)).Msg("inserted media variants")
+	}
+
+	// Step 7: Update media entry with new URL
 	mediaType := models.MediaTypeBucketVideo
 	if job.JobType == models.JobTypePhoto {
 		mediaType = models.MediaTypeBucketPhoto
@@ -181,7 +242,7 @@ func (w *Worker) processJob(ctx context.Context, job *models.ProcessingJob, jobD
 		return fmt.Errorf("failed to update media: %w", err)
 	}
 
-	// Step 7: Mark job as completed
+	// Step 8: Mark job as completed
 	detailsJSON, _ := json.Marshal(processingDetails)
 	detailsStr := string(detailsJSON)
 	job.ArchivePath = &archivePath
@@ -195,7 +256,7 @@ func (w *Worker) processJob(ctx context.Context, job *models.ProcessingJob, jobD
 		return fmt.Errorf("failed to mark completed: %w", err)
 	}
 
-	// Step 8: Delete original from ingest bucket
+	// Step 9: Delete original from ingest bucket
 	if err := w.s3Client.DeleteFromIngest(ctx, job.IngestPath); err != nil {
 		w.logger.Warn().Err(err).Str("key", job.IngestPath).Msg("failed to delete from ingest")
 	}
@@ -207,6 +268,92 @@ func (w *Worker) processJob(ctx context.Context, job *models.ProcessingJob, jobD
 		Msg("job completed successfully")
 
 	return nil
+}
+
+// buildMediaVariants creates MediaVariant records for the processed media
+func (w *Worker) buildMediaVariants(
+	mediaID int64, bucket string,
+	archivePath, optimizedPath, thumbnailPath string,
+	originalSize, optimizedSize, thumbnailSize int64,
+	width, height int, duration float64, mimeType string,
+) []*models.MediaVariant {
+	var variants []*models.MediaVariant
+
+	// Determine original mime type from extension
+	originalMimeType := w.getMimeTypeFromPath(archivePath)
+
+	// Original variant
+	originalVariant := models.NewMediaVariant(mediaID, models.VariantTypeOriginal, bucket, archivePath)
+	originalVariant.FileSize = &originalSize
+	originalVariant.MimeType = &originalMimeType
+	if width > 0 {
+		originalVariant.Width = &width
+	}
+	if height > 0 {
+		originalVariant.Height = &height
+	}
+	if duration > 0 {
+		originalVariant.DurationSeconds = &duration
+	}
+	variants = append(variants, originalVariant)
+
+	// Optimized variant
+	if optimizedPath != "" {
+		optimizedVariant := models.NewMediaVariant(mediaID, models.VariantTypeOptimized, bucket, optimizedPath)
+		optimizedVariant.FileSize = &optimizedSize
+		optimizedVariant.MimeType = &mimeType
+		if width > 0 {
+			optimizedVariant.Width = &width
+		}
+		if height > 0 {
+			optimizedVariant.Height = &height
+		}
+		if duration > 0 {
+			optimizedVariant.DurationSeconds = &duration
+		}
+		variants = append(variants, optimizedVariant)
+	}
+
+	// Thumbnail variant
+	if thumbnailPath != "" {
+		thumbnailMimeType := "image/jpeg"
+		thumbnailVariant := models.NewMediaVariant(mediaID, models.VariantTypeThumbnail, bucket, thumbnailPath)
+		thumbnailVariant.FileSize = &thumbnailSize
+		thumbnailVariant.MimeType = &thumbnailMimeType
+		// Thumbnail dimensions are different - we could calculate them but for now leave as nil
+		variants = append(variants, thumbnailVariant)
+	}
+
+	return variants
+}
+
+// getMimeTypeFromPath determines mime type from file extension
+func (w *Worker) getMimeTypeFromPath(path string) string {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".mp4":
+		return "video/mp4"
+	case ".mov":
+		return "video/quicktime"
+	case ".avi":
+		return "video/x-msvideo"
+	case ".mkv":
+		return "video/x-matroska"
+	case ".webm":
+		return "video/webm"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".png":
+		return "image/png"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	case ".heic", ".heif":
+		return "image/heic"
+	default:
+		return "application/octet-stream"
+	}
 }
 
 // downloadFile downloads a file from S3 to local storage
@@ -277,6 +424,13 @@ func (w *Worker) handleJobError(ctx context.Context, job *models.ProcessingJob, 
 	if markErr := w.jobRepo.MarkFailed(ctx, job.ID, err.Error(), w.cfg.MaxRetries); markErr != nil {
 		w.logger.Error().Err(markErr).Msg("failed to mark job as failed")
 		return markErr
+	}
+
+	// If we've exceeded max retries, mark media as failed
+	if job.RetryCount+1 >= w.cfg.MaxRetries {
+		if statusErr := w.mediaRepo.UpdateStatus(ctx, job.MediaID, models.MediaStatusFailed); statusErr != nil {
+			w.logger.Warn().Err(statusErr).Int64("media_id", job.MediaID).Msg("failed to update media status to failed")
+		}
 	}
 
 	return err

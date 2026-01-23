@@ -129,9 +129,9 @@ func (p *VideoProcessor) Process(ctx context.Context, inputPath, outputDir strin
 		Float64("duration", info.Duration).
 		Msg("processing video")
 
-	// Generate output filename
+	// Generate output filename with _optimized suffix to ensure uniqueness
 	baseName := strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))
-	outputPath := filepath.Join(outputDir, baseName+"."+p.cfg.VideoOutputFormat)
+	outputPath := filepath.Join(outputDir, baseName+"_optimized."+p.cfg.VideoOutputFormat)
 	thumbnailPath := filepath.Join(outputDir, baseName+"_thumb.jpg")
 
 	// Calculate target dimensions (maintain aspect ratio, cap at max)

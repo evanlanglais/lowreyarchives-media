@@ -72,9 +72,10 @@ func main() {
 	// Create repositories
 	jobRepo := db.NewJobRepository(database)
 	mediaRepo := db.NewMediaRepository(database)
+	variantRepo := db.NewVariantRepository(database)
 
 	// Create and start worker pool
-	pool := worker.NewPool(cfg, jobRepo, mediaRepo, s3Client, logger)
+	pool := worker.NewPool(cfg, jobRepo, mediaRepo, variantRepo, s3Client, logger)
 	if err := pool.Start(ctx); err != nil {
 		logger.Fatal().Err(err).Msg("failed to start worker pool")
 	}

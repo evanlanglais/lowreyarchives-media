@@ -21,13 +21,13 @@ func NewMediaRepository(db *DB) *MediaRepository {
 // GetByID retrieves a media entry by its ID
 func (r *MediaRepository) GetByID(ctx context.Context, id int64) (*models.Media, error) {
 	query := `
-		SELECT id, media_url, media_type, description, created_at, created_by
+		SELECT id, media_url, media_type, description, status, created_at, created_by
 		FROM media WHERE id = $1`
 
 	media := &models.Media{}
 	err := r.db.pool.QueryRow(ctx, query, id).Scan(
 		&media.ID, &media.MediaURL, &media.MediaType,
-		&media.Description, &media.CreatedAt, &media.CreatedBy,
+		&media.Description, &media.Status, &media.CreatedAt, &media.CreatedBy,
 	)
 
 	if err == pgx.ErrNoRows {
@@ -39,29 +39,41 @@ func (r *MediaRepository) GetByID(ctx context.Context, id int64) (*models.Media,
 	return media, nil
 }
 
-// UpdateMediaURL updates the media URL and type after processing
+// UpdateMediaURL updates the media URL, type, and sets status to ready after processing
 func (r *MediaRepository) UpdateMediaURL(ctx context.Context, id int64, newURL string, mediaType models.MediaType) error {
-	query := `UPDATE media SET media_url = $1, media_type = $2 WHERE id = $3`
-	_, err := r.db.pool.Exec(ctx, query, newURL, mediaType, id)
+	query := `UPDATE media SET media_url = $1, media_type = $2, status = $3 WHERE id = $4`
+	_, err := r.db.pool.Exec(ctx, query, newURL, mediaType, models.MediaStatusReady, id)
 	if err != nil {
 		return fmt.Errorf("failed to update media URL: %w", err)
 	}
 	return nil
 }
 
+// UpdateStatus updates the media status
+func (r *MediaRepository) UpdateStatus(ctx context.Context, id int64, status models.MediaStatus) error {
+	query := `UPDATE media SET status = $1 WHERE id = $2`
+	_, err := r.db.pool.Exec(ctx, query, status, id)
+	if err != nil {
+		return fmt.Errorf("failed to update media status: %w", err)
+	}
+	return nil
+}
+
 // GetUnprocessedMedia finds media entries that need processing
-// These are media with ingest bucket paths that don't have corresponding processing jobs
-func (r *MediaRepository) GetUnprocessedMedia(ctx context.Context, ingestBucketPrefix string) ([]*models.Media, error) {
+// These are media with ingest paths (media_url starts with 'ingest/') that don't have corresponding processing jobs
+// and have status 'pending' or null
+func (r *MediaRepository) GetUnprocessedMedia(ctx context.Context, ingestPathPrefix string) ([]*models.Media, error) {
 	query := `
-		SELECT m.id, m.media_url, m.media_type, m.description, m.created_at, m.created_by
+		SELECT m.id, m.media_url, m.media_type, m.description, m.status, m.created_at, m.created_by
 		FROM media m
 		WHERE m.media_url LIKE $1
+		AND (m.status IS NULL OR m.status = 'pending')
 		AND NOT EXISTS (
 			SELECT 1 FROM processing_jobs pj
 			WHERE pj.media_id = m.id AND pj.status NOT IN ('failed')
 		)`
 
-	rows, err := r.db.pool.Query(ctx, query, ingestBucketPrefix+"%")
+	rows, err := r.db.pool.Query(ctx, query, ingestPathPrefix+"%")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get unprocessed media: %w", err)
 	}
@@ -72,7 +84,7 @@ func (r *MediaRepository) GetUnprocessedMedia(ctx context.Context, ingestBucketP
 		media := &models.Media{}
 		err := rows.Scan(
 			&media.ID, &media.MediaURL, &media.MediaType,
-			&media.Description, &media.CreatedAt, &media.CreatedBy,
+			&media.Description, &media.Status, &media.CreatedAt, &media.CreatedBy,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan media: %w", err)

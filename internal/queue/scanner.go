@@ -79,8 +79,11 @@ func (s *Scanner) scan(ctx context.Context) {
 
 // scanDatabaseMedia finds media entries that need processing
 func (s *Scanner) scanDatabaseMedia(ctx context.Context) error {
-	// Find media with ingest bucket paths that don't have processing jobs
-	ingestPrefix := s.cfg.S3IngestBucket + "/"
+	// Find media with ingest paths (media_url like 'ingest/...') that don't have processing jobs
+	ingestPrefix := s.cfg.S3IngestPath
+	if ingestPrefix != "" && !strings.HasSuffix(ingestPrefix, "/") {
+		ingestPrefix += "/"
+	}
 	mediaList, err := s.mediaRepo.GetUnprocessedMedia(ctx, ingestPrefix)
 	if err != nil {
 		return err
