@@ -6,7 +6,7 @@ namespace: lowreyarchives
 resources:
   - namespace.yaml
   - serviceaccount.yaml
-  - secret.yaml
+  # secret.yaml is excluded - managed manually per-cluster
   - configmap.yaml
   - pvc.yaml
   - deployment.yaml

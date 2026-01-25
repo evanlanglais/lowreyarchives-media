@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.lowreyarchives.media-processor</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/media-processor</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Load sensitive vars from env file via wrapper, or set here -->
+        <key>TEMP_DIR</key>
+        <string>/var/lib/media-processor/processing</string>
+        <key>LOG_LEVEL</key>
+        <string>info</string>
+        <key>HEALTH_PORT</key>
+        <string>8080</string>
+    </dict>
+
+    <key>WorkingDirectory</key>
+    <string>/var/lib/media-processor</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/var/log/media-processor/stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/var/log/media-processor/stderr.log</string>
+
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>4096</integer>
+    </dict>
+</dict>
+</plist>

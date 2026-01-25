@@ -38,3 +38,9 @@ Thumbs.db
 
 # Build artifacts
 dist/
+
+# Kubernetes secrets (managed manually per-cluster)
+deployments/k8s/secret.yaml
+
+# macOS deployment secrets
+deployments/macos/media-processor.env

@@ -21,10 +21,9 @@ type Config struct {
 	S3ArchivePath  string `envconfig:"S3_ARCHIVE_PATH" default:"archive"`
 
 	// Worker Configuration
-	WorkerCount       int `envconfig:"WORKER_COUNT" default:"4"`
-	PollIntervalSec   int `envconfig:"POLL_INTERVAL_SEC" default:"10"`
-	MaxRetries        int `envconfig:"MAX_RETRIES" default:"3"`
-	ProcessingTimeout int `envconfig:"PROCESSING_TIMEOUT_SEC" default:"3600"`
+	WorkerCount     int `envconfig:"WORKER_COUNT" default:"4"`
+	PollIntervalSec int `envconfig:"POLL_INTERVAL_SEC" default:"10"`
+	MaxRetries      int `envconfig:"MAX_RETRIES" default:"3"`
 
 	// Orphan Cleanup Configuration
 	// Files in ingest bucket older than this with no media record will be deleted
@@ -38,15 +37,15 @@ type Config struct {
 	HeartbeatTimeoutSec int `envconfig:"HEARTBEAT_TIMEOUT_SEC" default:"120"`
 
 	// FFmpeg Configuration
-	FFmpegPath         string `envconfig:"FFMPEG_PATH" default:"ffmpeg"`
-	FFprobePath        string `envconfig:"FFPROBE_PATH" default:"ffprobe"`
-	VideoOutputFormat  string `envconfig:"VIDEO_OUTPUT_FORMAT" default:"mp4"`
-	VideoCodec         string `envconfig:"VIDEO_CODEC" default:"libx264"`
-	VideoPreset        string `envconfig:"VIDEO_PRESET" default:"medium"`
-	VideoCRF           string `envconfig:"VIDEO_CRF" default:"23"`
-	AudioCodec         string `envconfig:"AUDIO_CODEC" default:"aac"`
-	MaxVideoWidth      int    `envconfig:"MAX_VIDEO_WIDTH" default:"1920"`
-	MaxVideoHeight     int    `envconfig:"MAX_VIDEO_HEIGHT" default:"1080"`
+	FFmpegPath        string `envconfig:"FFMPEG_PATH" default:"ffmpeg"`
+	FFprobePath       string `envconfig:"FFPROBE_PATH" default:"ffprobe"`
+	VideoOutputFormat string `envconfig:"VIDEO_OUTPUT_FORMAT" default:"mp4"`
+	VideoCodec        string `envconfig:"VIDEO_CODEC" default:"libx264"`
+	VideoPreset       string `envconfig:"VIDEO_PRESET" default:"medium"`
+	VideoCRF          string `envconfig:"VIDEO_CRF" default:"23"`
+	AudioCodec        string `envconfig:"AUDIO_CODEC" default:"aac"`
+	MaxVideoWidth     int    `envconfig:"MAX_VIDEO_WIDTH" default:"1920"`
+	MaxVideoHeight    int    `envconfig:"MAX_VIDEO_HEIGHT" default:"1080"`
 
 	// Image Processing
 	ImageMaxWidth  int `envconfig:"IMAGE_MAX_WIDTH" default:"2048"`

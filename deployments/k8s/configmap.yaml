@@ -5,7 +5,7 @@ metadata:
   namespace: lowreyarchives
 data:
   # S3/Garage configuration
-  S3_ENDPOINT: "https://garage-media-s3.lowreyarchives.com"
+  S3_ENDPOINT: "http://xynon-vm-storage.xynondc:3900"
   S3_REGION: "garage"
   S3_INGEST_BUCKET: "fa-dmz"
   S3_INGEST_PATH: "ingest"
@@ -16,7 +16,6 @@ data:
   WORKER_COUNT: "4"
   POLL_INTERVAL_SEC: "10"
   MAX_RETRIES: "3"
-  PROCESSING_TIMEOUT_SEC: "3600"
 
   # Video processing
   FFMPEG_PATH: "/usr/bin/ffmpeg"
@@ -24,7 +23,7 @@ data:
   VIDEO_OUTPUT_FORMAT: "mp4"
   VIDEO_CODEC: "libx264"
   VIDEO_PRESET: "medium"
-  VIDEO_CRF: "23"
+  VIDEO_CRF: "20"
   AUDIO_CODEC: "aac"
   MAX_VIDEO_WIDTH: "1920"
   MAX_VIDEO_HEIGHT: "1080"
