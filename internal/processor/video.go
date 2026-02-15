@@ -39,7 +39,7 @@ type VideoInfo struct {
 	HasAudio     bool    `json:"has_audio"`
 	AudioCodec   string  `json:"audio_codec,omitempty"`
 	IsInterlaced bool    `json:"is_interlaced"`
-	FieldOrder   string  `json:"field_order,omitempty"` // "tt", "bb", "tb", "bt", or "progressive"
+	FieldOrder   string  `json:"field_order,omitempty"` // "tt", "bb", "tb", "bt", "progressive", "tff", "bff"
 }
 
 // ProcessResult contains the results of video processing
@@ -100,7 +100,7 @@ func (p *VideoProcessor) GetVideoInfo(ctx context.Context, inputPath string) (*V
 					info.FrameRate = num / den
 				}
 			}
-			// Check for interlacing
+			// Check for interlacing - first try metadata
 			info.FieldOrder = stream.FieldOrder
 			info.IsInterlaced = isInterlacedFieldOrder(stream.FieldOrder)
 		} else if stream.CodecType == "audio" {
@@ -117,6 +117,24 @@ func (p *VideoProcessor) GetVideoInfo(ctx context.Context, inputPath string) (*V
 		info.Bitrate, _ = strconv.ParseInt(probeResult.Format.BitRate, 10, 64)
 	}
 
+	// If metadata didn't indicate interlacing, analyze actual frame content
+	// Many old captured videos (VHS, DV, analog) lack correct field_order metadata
+	if !info.IsInterlaced {
+		detected, fieldOrder, err := p.detectInterlaceByContent(ctx, inputPath)
+		if err != nil {
+			p.logger.Warn().Err(err).Msg("content-based interlace detection failed, relying on metadata")
+		} else if detected {
+			p.logger.Info().
+				Str("detected_field_order", fieldOrder).
+				Str("metadata_field_order", info.FieldOrder).
+				Msg("content analysis detected interlacing missed by metadata")
+			info.IsInterlaced = true
+			if info.FieldOrder == "" || info.FieldOrder == "progressive" || info.FieldOrder == "unknown" {
+				info.FieldOrder = fieldOrder
+			}
+		}
+	}
+
 	return info, nil
 }
 
@@ -125,11 +143,98 @@ func isInterlacedFieldOrder(fieldOrder string) bool {
 	switch fieldOrder {
 	case "tt", "tb", "bt", "bb": // top-top, top-bottom, bottom-top, bottom-bottom
 		return true
-	case "progressive", "":
+	case "progressive", "", "unknown":
 		return false
 	default:
 		return false
 	}
+}
+
+// detectInterlaceByContent uses ffmpeg's idet filter to analyze actual frame content
+// for interlacing patterns. This catches interlaced content where container metadata
+// is missing or incorrect (common with old VHS captures, DV imports, etc.)
+func (p *VideoProcessor) detectInterlaceByContent(ctx context.Context, inputPath string) (bool, string, error) {
+	// Analyze up to 500 frames with the idet filter
+	args := []string{
+		"-i", inputPath,
+		"-vf", "idet",
+		"-frames:v", "500",
+		"-an",
+		"-f", "null",
+		"-",
+	}
+
+	cmd := exec.CommandContext(ctx, p.cfg.FFmpegPath, args...)
+	// idet outputs to stderr
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return false, "", fmt.Errorf("idet detection failed: %w", err)
+	}
+
+	return parseIdetOutput(string(output))
+}
+
+// parseIdetOutput parses the idet filter output to determine interlacing
+func parseIdetOutput(output string) (bool, string, error) {
+	// idet outputs lines like:
+	// [Parsed_idet_0 @ 0x...] Repeated Fields: Neither: 500 Top:     0 Bottom:     0
+	// [Parsed_idet_0 @ 0x...] Single frame detection: TFF:   250 BFF:     0 Progressive:   200 Undetermined:    50
+	// [Parsed_idet_0 @ 0x...] Multi frame detection: TFF:   300 BFF:     0 Progressive:   150 Undetermined:    50
+
+	var tff, bff, progressive, undetermined int
+
+	// Parse "Multi frame detection" line (most reliable)
+	for _, line := range strings.Split(output, "\n") {
+		if !strings.Contains(line, "Multi frame detection") {
+			continue
+		}
+
+		// Extract counts from the line
+		tff = extractIdetCount(line, "TFF:")
+		bff = extractIdetCount(line, "BFF:")
+		progressive = extractIdetCount(line, "Progressive:")
+		undetermined = extractIdetCount(line, "Undetermined:")
+		break
+	}
+
+	total := tff + bff + progressive + undetermined
+	if total == 0 {
+		return false, "", fmt.Errorf("no idet statistics found in output")
+	}
+
+	interlaced := tff + bff
+	// Consider interlaced if more than 30% of analyzed frames show interlacing
+	// This threshold avoids false positives from occasional combing artifacts
+	// while still catching genuinely interlaced content
+	ratio := float64(interlaced) / float64(total)
+	if ratio > 0.30 {
+		fieldOrder := "tff"
+		if bff > tff {
+			fieldOrder = "bff"
+		}
+		return true, fieldOrder, nil
+	}
+
+	return false, "", nil
+}
+
+// extractIdetCount extracts the numeric count after a label in an idet output line
+func extractIdetCount(line, label string) int {
+	idx := strings.Index(line, label)
+	if idx < 0 {
+		return 0
+	}
+	rest := strings.TrimSpace(line[idx+len(label):])
+	// Take the first whitespace-delimited token
+	parts := strings.Fields(rest)
+	if len(parts) == 0 {
+		return 0
+	}
+	val, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0
+	}
+	return val
 }
 
 // Process transcodes a video file to an optimized format
