@@ -155,7 +155,9 @@ func isInterlacedFieldOrder(fieldOrder string) bool {
 // is missing or incorrect (common with old VHS captures, DV imports, etc.)
 func (p *VideoProcessor) detectInterlaceByContent(ctx context.Context, inputPath string) (bool, string, error) {
 	// Analyze up to 500 frames with the idet filter
+	// -v info is required so idet prints its summary statistics to stderr
 	args := []string{
+		"-v", "info",
 		"-i", inputPath,
 		"-vf", "idet",
 		"-frames:v", "500",
@@ -182,24 +184,31 @@ func parseIdetOutput(output string) (bool, string, error) {
 	// [Parsed_idet_0 @ 0x...] Multi frame detection: TFF:   300 BFF:     0 Progressive:   150 Undetermined:    50
 
 	var tff, bff, progressive, undetermined int
+	found := false
 
-	// Parse "Multi frame detection" line (most reliable)
+	// Parse "Multi frame detection" lines - take the LAST one since ffmpeg prints
+	// an initial zeroed-out summary when the filter is created, then the final
+	// accumulated statistics when the filter is destroyed
 	for _, line := range strings.Split(output, "\n") {
 		if !strings.Contains(line, "Multi frame detection") {
 			continue
 		}
 
-		// Extract counts from the line
+		// Extract counts from the line (overwrites previous match)
 		tff = extractIdetCount(line, "TFF:")
 		bff = extractIdetCount(line, "BFF:")
 		progressive = extractIdetCount(line, "Progressive:")
 		undetermined = extractIdetCount(line, "Undetermined:")
-		break
+		found = true
+	}
+
+	if !found {
+		return false, "", fmt.Errorf("no idet statistics found in output")
 	}
 
 	total := tff + bff + progressive + undetermined
 	if total == 0 {
-		return false, "", fmt.Errorf("no idet statistics found in output")
+		return false, "", fmt.Errorf("idet statistics all zero, could not determine interlacing")
 	}
 
 	interlaced := tff + bff
