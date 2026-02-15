@@ -60,6 +60,12 @@ type Config struct {
 
 	// Logging
 	LogLevel string `envconfig:"LOG_LEVEL" default:"info"`
+
+	// Cache Invalidation Webhook
+	// Called when media status changes to notify the frontend to invalidate caches
+	WebhookURL     string `envconfig:"WEBHOOK_URL" default:""`
+	WebhookToken   string `envconfig:"WEBHOOK_TOKEN" default:""`
+	WebhookTimeout int    `envconfig:"WEBHOOK_TIMEOUT_SEC" default:"10"`
 }
 
 func Load() (*Config, error) {

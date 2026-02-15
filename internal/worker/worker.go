@@ -16,6 +16,7 @@ import (
 	"github.com/lowreyarchives/media-processor/internal/models"
 	"github.com/lowreyarchives/media-processor/internal/processor"
 	"github.com/lowreyarchives/media-processor/internal/storage"
+	"github.com/lowreyarchives/media-processor/internal/webhook"
 	"github.com/rs/zerolog"
 )
 
@@ -27,6 +28,7 @@ type Worker struct {
 	mediaRepo      *db.MediaRepository
 	variantRepo    *db.VariantRepository
 	s3Client       *storage.S3Client
+	webhookClient  *webhook.Client
 	videoProcessor *processor.VideoProcessor
 	imageProcessor *processor.ImageProcessor
 	logger         zerolog.Logger
@@ -40,6 +42,7 @@ func NewWorker(
 	mediaRepo *db.MediaRepository,
 	variantRepo *db.VariantRepository,
 	s3Client *storage.S3Client,
+	webhookClient *webhook.Client,
 	logger zerolog.Logger,
 ) (*Worker, error) {
 	workerID := fmt.Sprintf("worker-%s", uuid.New().String()[:8])
@@ -57,6 +60,7 @@ func NewWorker(
 		mediaRepo:      mediaRepo,
 		variantRepo:    variantRepo,
 		s3Client:       s3Client,
+		webhookClient:  webhookClient,
 		videoProcessor: processor.NewVideoProcessor(cfg, logger),
 		imageProcessor: processor.NewImageProcessor(cfg, logger),
 		logger:         logger.With().Str("worker_id", workerID).Logger(),
@@ -108,6 +112,9 @@ func (w *Worker) processNextJob(ctx context.Context) error {
 	if err := w.mediaRepo.UpdateStatus(ctx, job.MediaID, models.MediaStatusProcessing); err != nil {
 		w.logger.Warn().Err(err).Int64("media_id", job.MediaID).Msg("failed to update media status to processing")
 	}
+
+	// Notify frontend of processing status change
+	w.webhookClient.NotifyMediaProcessing(ctx, job.MediaID, job.EventID)
 
 	// Create job-specific directory
 	jobDir := filepath.Join(w.workDir, fmt.Sprintf("job-%d", job.ID))
@@ -288,6 +295,9 @@ func (w *Worker) processJob(ctx context.Context, job *models.ProcessingJob, jobD
 		return fmt.Errorf("failed to mark completed: %w", err)
 	}
 
+	// Notify frontend of media ready status
+	w.webhookClient.NotifyMediaReady(ctx, job.MediaID, job.EventID)
+
 	// Step 9: Delete original from ingest bucket
 	if err := w.s3Client.DeleteFromIngest(ctx, job.IngestPath); err != nil {
 		w.logger.Warn().Err(err).Str("key", job.IngestPath).Msg("failed to delete from ingest")
@@ -458,6 +468,8 @@ func (w *Worker) handleJobError(ctx context.Context, job *models.ProcessingJob, 
 		if statusErr := w.mediaRepo.UpdateStatus(ctx, job.MediaID, models.MediaStatusFailed); statusErr != nil {
 			w.logger.Warn().Err(statusErr).Int64("media_id", job.MediaID).Msg("failed to update media status to failed")
 		}
+		// Notify frontend of media failure
+		w.webhookClient.NotifyMediaFailed(ctx, job.MediaID, job.EventID)
 	}
 
 	return err

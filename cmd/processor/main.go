@@ -13,6 +13,7 @@ import (
 	"github.com/lowreyarchives/media-processor/internal/db"
 	"github.com/lowreyarchives/media-processor/internal/queue"
 	"github.com/lowreyarchives/media-processor/internal/storage"
+	"github.com/lowreyarchives/media-processor/internal/webhook"
 	"github.com/lowreyarchives/media-processor/internal/worker"
 	"github.com/rs/zerolog"
 )
@@ -74,8 +75,16 @@ func main() {
 	mediaRepo := db.NewMediaRepository(database)
 	variantRepo := db.NewVariantRepository(database)
 
+	// Create webhook client for cache invalidation
+	webhookClient := webhook.NewClient(cfg.WebhookURL, cfg.WebhookToken, cfg.WebhookTimeout, logger)
+	if webhookClient.Enabled() {
+		logger.Info().Str("webhook", webhookClient.String()).Msg("cache invalidation webhook enabled")
+	} else {
+		logger.Info().Msg("cache invalidation webhook disabled (no WEBHOOK_URL configured)")
+	}
+
 	// Create and start worker pool
-	pool := worker.NewPool(cfg, jobRepo, mediaRepo, variantRepo, s3Client, logger)
+	pool := worker.NewPool(cfg, jobRepo, mediaRepo, variantRepo, s3Client, webhookClient, logger)
 	if err := pool.Start(ctx); err != nil {
 		logger.Fatal().Err(err).Msg("failed to start worker pool")
 	}
