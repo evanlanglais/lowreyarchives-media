@@ -61,6 +61,10 @@ type Config struct {
 	// Logging
 	LogLevel string `envconfig:"LOG_LEVEL" default:"info"`
 
+	// Reprocessing Configuration
+	ReprocessEnable    bool `envconfig:"REPROCESS_ENABLE" default:"true"`
+	ReprocessBatchSize int  `envconfig:"REPROCESS_BATCH_SIZE" default:"5"`
+
 	// Cache Invalidation Webhook
 	// Called when media status changes to notify the frontend to invalidate caches
 	WebhookURL     string `envconfig:"WEBHOOK_URL" default:""`

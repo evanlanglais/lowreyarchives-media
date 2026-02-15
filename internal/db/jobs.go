@@ -24,13 +24,13 @@ func (r *JobRepository) Create(ctx context.Context, job *models.ProcessingJob) e
 	query := `
 		INSERT INTO processing_jobs (
 			media_id, event_id, job_type, status, ingest_path,
-			retry_count, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			retry_count, engine_version, is_reprocess, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		RETURNING id`
 
 	err := r.db.pool.QueryRow(ctx, query,
 		job.MediaID, job.EventID, job.JobType, job.Status, job.IngestPath,
-		job.RetryCount, job.CreatedAt, job.UpdatedAt,
+		job.RetryCount, job.EngineVersion, job.IsReprocess, job.CreatedAt, job.UpdatedAt,
 	).Scan(&job.ID)
 
 	if err != nil {
@@ -45,7 +45,8 @@ func (r *JobRepository) GetByID(ctx context.Context, id int64) (*models.Processi
 		SELECT id, media_id, event_id, job_type, status, ingest_path,
 			   archive_path, optimized_path, thumbnail_path, retry_count,
 			   error_message, worker_id, created_at, updated_at,
-			   started_at, completed_at, processing_details, last_heartbeat
+			   started_at, completed_at, processing_details, last_heartbeat,
+			   engine_version, is_reprocess
 		FROM processing_jobs WHERE id = $1`
 
 	job := &models.ProcessingJob{}
@@ -54,6 +55,7 @@ func (r *JobRepository) GetByID(ctx context.Context, id int64) (*models.Processi
 		&job.ArchivePath, &job.OptimizedPath, &job.ThumbnailPath, &job.RetryCount,
 		&job.ErrorMessage, &job.WorkerID, &job.CreatedAt, &job.UpdatedAt,
 		&job.StartedAt, &job.CompletedAt, &job.ProcessingDetails, &job.LastHeartbeat,
+		&job.EngineVersion, &job.IsReprocess,
 	)
 
 	if err == pgx.ErrNoRows {
@@ -81,7 +83,8 @@ func (r *JobRepository) ClaimPendingJob(ctx context.Context, workerID string) (*
 		RETURNING id, media_id, event_id, job_type, status, ingest_path,
 				  archive_path, optimized_path, thumbnail_path, retry_count,
 				  error_message, worker_id, created_at, updated_at,
-				  started_at, completed_at, processing_details, last_heartbeat`
+				  started_at, completed_at, processing_details, last_heartbeat,
+				  engine_version, is_reprocess`
 
 	now := time.Now()
 	job := &models.ProcessingJob{}
@@ -93,6 +96,7 @@ func (r *JobRepository) ClaimPendingJob(ctx context.Context, workerID string) (*
 		&job.ArchivePath, &job.OptimizedPath, &job.ThumbnailPath, &job.RetryCount,
 		&job.ErrorMessage, &job.WorkerID, &job.CreatedAt, &job.UpdatedAt,
 		&job.StartedAt, &job.CompletedAt, &job.ProcessingDetails, &job.LastHeartbeat,
+		&job.EngineVersion, &job.IsReprocess,
 	)
 
 	if err == pgx.ErrNoRows {
@@ -111,12 +115,12 @@ func (r *JobRepository) MarkCompleted(ctx context.Context, job *models.Processin
 		UPDATE processing_jobs
 		SET status = $1, archive_path = $2, optimized_path = $3,
 			thumbnail_path = $4, completed_at = $5, updated_at = $5,
-			processing_details = $6
-		WHERE id = $7`
+			processing_details = $6, engine_version = $7
+		WHERE id = $8`
 
 	_, err := r.db.pool.Exec(ctx, query,
 		models.JobStatusCompleted, job.ArchivePath, job.OptimizedPath,
-		job.ThumbnailPath, now, job.ProcessingDetails, job.ID,
+		job.ThumbnailPath, now, job.ProcessingDetails, job.EngineVersion, job.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to mark job completed: %w", err)
@@ -190,7 +194,8 @@ func (r *JobRepository) GetStaleJobs(ctx context.Context, timeout time.Duration)
 		SELECT id, media_id, event_id, job_type, status, ingest_path,
 			   archive_path, optimized_path, thumbnail_path, retry_count,
 			   error_message, worker_id, created_at, updated_at,
-			   started_at, completed_at, processing_details, last_heartbeat
+			   started_at, completed_at, processing_details, last_heartbeat,
+			   engine_version, is_reprocess
 		FROM processing_jobs
 		WHERE status = $1 AND (last_heartbeat IS NULL OR last_heartbeat < $2)`
 
@@ -208,6 +213,7 @@ func (r *JobRepository) GetStaleJobs(ctx context.Context, timeout time.Duration)
 			&job.ArchivePath, &job.OptimizedPath, &job.ThumbnailPath, &job.RetryCount,
 			&job.ErrorMessage, &job.WorkerID, &job.CreatedAt, &job.UpdatedAt,
 			&job.StartedAt, &job.CompletedAt, &job.ProcessingDetails, &job.LastHeartbeat,
+			&job.EngineVersion, &job.IsReprocess,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan stale job: %w", err)
@@ -232,6 +238,58 @@ func (r *JobRepository) ResetStaleJob(ctx context.Context, jobID int64) error {
 		return fmt.Errorf("failed to reset stale job: %w", err)
 	}
 	return nil
+}
+
+// ReprocessCandidate represents a media item that needs reprocessing
+type ReprocessCandidate struct {
+	MediaID        int64
+	JobType        models.JobType
+	CurrentVersion int
+	ArchivePath    string
+	EventID        *int64
+}
+
+// GetMediaNeedingReprocess finds media that was processed with an outdated engine version
+func (r *JobRepository) GetMediaNeedingReprocess(ctx context.Context, videoVersion, photoVersion, limit int) ([]ReprocessCandidate, error) {
+	query := `
+		WITH latest_completed AS (
+			SELECT DISTINCT ON (media_id)
+				media_id, job_type, engine_version, archive_path, event_id
+			FROM processing_jobs
+			WHERE status = 'completed' AND archive_path IS NOT NULL
+			ORDER BY media_id, completed_at DESC
+		)
+		SELECT lc.media_id, lc.job_type, lc.engine_version, lc.archive_path, lc.event_id
+		FROM latest_completed lc
+		JOIN media m ON m.id = lc.media_id
+		WHERE m.status = 'ready'
+		AND (
+			(lc.job_type = 'video' AND lc.engine_version < $1)
+			OR (lc.job_type = 'photo' AND lc.engine_version < $2)
+		)
+		AND NOT EXISTS (
+			SELECT 1 FROM processing_jobs pj2
+			WHERE pj2.media_id = lc.media_id
+			AND pj2.status IN ('pending', 'processing', 'retrying')
+		)
+		LIMIT $3`
+
+	rows, err := r.db.pool.Query(ctx, query, videoVersion, photoVersion, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get media needing reprocess: %w", err)
+	}
+	defer rows.Close()
+
+	var candidates []ReprocessCandidate
+	for rows.Next() {
+		var c ReprocessCandidate
+		err := rows.Scan(&c.MediaID, &c.JobType, &c.CurrentVersion, &c.ArchivePath, &c.EventID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan reprocess candidate: %w", err)
+		}
+		candidates = append(candidates, c)
+	}
+	return candidates, nil
 }
 
 // DeleteCompletedJobs removes completed jobs older than the given duration

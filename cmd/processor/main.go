@@ -59,10 +59,10 @@ func main() {
 	defer database.Close()
 
 	// Run migrations
-	//if err := database.RunMigrations(ctx); err != nil {
-	//	logger.Fatal().Err(err).Msg("failed to run migrations")
-	//}
-	//logger.Info().Msg("database migrations completed")
+	if err := database.RunMigrations(ctx); err != nil {
+		logger.Fatal().Err(err).Msg("failed to run migrations")
+	}
+	logger.Info().Msg("database migrations completed")
 
 	// Initialize S3 client
 	s3Client, err := storage.NewS3Client(cfg)

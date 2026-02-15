@@ -44,11 +44,24 @@ CREATE INDEX IF NOT EXISTS idx_processing_jobs_worker ON processing_jobs(worker_
 CREATE INDEX IF NOT EXISTS idx_processing_jobs_completed ON processing_jobs(status, completed_at) WHERE status = 'completed';
 `
 
+// Migration to add reprocessing support columns
+const addReprocessingColumns = `
+ALTER TABLE processing_jobs ADD COLUMN IF NOT EXISTS engine_version INT NOT NULL DEFAULT 1;
+ALTER TABLE processing_jobs ADD COLUMN IF NOT EXISTS is_reprocess BOOLEAN NOT NULL DEFAULT false;
+CREATE INDEX IF NOT EXISTS idx_processing_jobs_reprocess ON processing_jobs(media_id, engine_version) WHERE status = 'completed';
+`
+
 // RunMigrations runs the database migrations
 func (db *DB) RunMigrations(ctx context.Context) error {
-	_, err := db.pool.Exec(ctx, createProcessingJobsTable)
+	//_, err := db.pool.Exec(ctx, createProcessingJobsTable)
+	//if err != nil {
+	//	return fmt.Errorf("failed to create processing_jobs table: %w", err)
+	//}
+
+	_, err := db.pool.Exec(ctx, addReprocessingColumns)
 	if err != nil {
-		return fmt.Errorf("failed to create processing_jobs table: %w", err)
+		return fmt.Errorf("failed to add reprocessing columns: %w", err)
 	}
+
 	return nil
 }

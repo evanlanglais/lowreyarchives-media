@@ -43,20 +43,41 @@ type ProcessingJob struct {
 	CompletedAt       *time.Time `db:"completed_at" json:"completed_at,omitempty"`
 	ProcessingDetails *string    `db:"processing_details" json:"processing_details,omitempty"`
 	LastHeartbeat     *time.Time `db:"last_heartbeat" json:"last_heartbeat,omitempty"`
+	EngineVersion     int        `db:"engine_version" json:"engine_version"`
+	IsReprocess       bool       `db:"is_reprocess" json:"is_reprocess"`
 }
 
 // NewProcessingJob creates a new processing job with default values
-func NewProcessingJob(mediaID int64, eventID *int64, jobType JobType, ingestPath string) *ProcessingJob {
+func NewProcessingJob(mediaID int64, eventID *int64, jobType JobType, ingestPath string, engineVersion int) *ProcessingJob {
 	now := time.Now()
 	return &ProcessingJob{
-		MediaID:    mediaID,
-		EventID:    eventID,
-		JobType:    jobType,
-		Status:     JobStatusPending,
-		IngestPath: ingestPath,
-		RetryCount: 0,
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		MediaID:       mediaID,
+		EventID:       eventID,
+		JobType:       jobType,
+		Status:        JobStatusPending,
+		IngestPath:    ingestPath,
+		RetryCount:    0,
+		EngineVersion: engineVersion,
+		IsReprocess:   false,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+}
+
+// NewReprocessingJob creates a reprocessing job that downloads from the archive path
+func NewReprocessingJob(mediaID int64, eventID *int64, jobType JobType, archivePath string, engineVersion int) *ProcessingJob {
+	now := time.Now()
+	return &ProcessingJob{
+		MediaID:       mediaID,
+		EventID:       eventID,
+		JobType:       jobType,
+		Status:        JobStatusPending,
+		IngestPath:    archivePath, // reprocess jobs use the archive path as their source
+		RetryCount:    0,
+		EngineVersion: engineVersion,
+		IsReprocess:   true,
+		CreatedAt:     now,
+		UpdatedAt:     now,
 	}
 }
 

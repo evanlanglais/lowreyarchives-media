@@ -106,15 +106,17 @@ func (w *Worker) processNextJob(ctx context.Context) error {
 		Int64("job_id", job.ID).
 		Int64("media_id", job.MediaID).
 		Str("job_type", string(job.JobType)).
+		Bool("is_reprocess", job.IsReprocess).
 		Msg("processing job")
 
-	// Update media status to processing
-	if err := w.mediaRepo.UpdateStatus(ctx, job.MediaID, models.MediaStatusProcessing); err != nil {
-		w.logger.Warn().Err(err).Int64("media_id", job.MediaID).Msg("failed to update media status to processing")
+	// For normal jobs, update media status and notify frontend.
+	// Reprocess jobs keep media in "ready" state — no user-visible changes.
+	if !job.IsReprocess {
+		if err := w.mediaRepo.UpdateStatus(ctx, job.MediaID, models.MediaStatusProcessing); err != nil {
+			w.logger.Warn().Err(err).Int64("media_id", job.MediaID).Msg("failed to update media status to processing")
+		}
+		w.webhookClient.NotifyMediaProcessing(ctx, job.MediaID, job.EventID)
 	}
-
-	// Notify frontend of processing status change
-	w.webhookClient.NotifyMediaProcessing(ctx, job.MediaID, job.EventID)
 
 	// Create job-specific directory
 	jobDir := filepath.Join(w.workDir, fmt.Sprintf("job-%d", job.ID))
@@ -165,8 +167,16 @@ func (w *Worker) sendHeartbeats(ctx context.Context, jobID int64, done chan<- st
 
 // processJob handles the full processing pipeline for a job
 func (w *Worker) processJob(ctx context.Context, job *models.ProcessingJob, jobDir string) error {
-	// Step 1: Download file from ingest bucket
-	localPath, err := w.downloadFile(ctx, job.IngestPath, jobDir)
+	// Step 1: Download source file
+	var localPath string
+	var err error
+	if job.IsReprocess {
+		// Reprocess: download from media bucket (archive path)
+		localPath, err = w.downloadFromMedia(ctx, job.IngestPath, jobDir)
+	} else {
+		// Normal: download from ingest bucket
+		localPath, err = w.downloadFile(ctx, job.IngestPath, jobDir)
+	}
 	if err != nil {
 		return fmt.Errorf("download failed: %w", err)
 	}
@@ -235,10 +245,15 @@ func (w *Worker) processJob(ctx context.Context, job *models.ProcessingJob, jobD
 		}
 	}
 
-	// Step 3: Archive original file
-	archivePath, err := w.s3Client.ArchiveOriginal(ctx, job.IngestPath)
-	if err != nil {
-		return fmt.Errorf("archiving failed: %w", err)
+	// Step 3: Archive original file (skip for reprocess — already archived)
+	var archivePath string
+	if job.IsReprocess {
+		archivePath = job.IngestPath // already the archive path
+	} else {
+		archivePath, err = w.s3Client.ArchiveOriginal(ctx, job.IngestPath)
+		if err != nil {
+			return fmt.Errorf("archiving failed: %w", err)
+		}
 	}
 
 	// Step 4: Upload optimized file to media bucket
@@ -298,9 +313,11 @@ func (w *Worker) processJob(ctx context.Context, job *models.ProcessingJob, jobD
 	// Notify frontend of media ready status
 	w.webhookClient.NotifyMediaReady(ctx, job.MediaID, job.EventID)
 
-	// Step 9: Delete original from ingest bucket
-	if err := w.s3Client.DeleteFromIngest(ctx, job.IngestPath); err != nil {
-		w.logger.Warn().Err(err).Str("key", job.IngestPath).Msg("failed to delete from ingest")
+	// Step 9: Delete original from ingest bucket (skip for reprocess — source is the archive)
+	if !job.IsReprocess {
+		if err := w.s3Client.DeleteFromIngest(ctx, job.IngestPath); err != nil {
+			w.logger.Warn().Err(err).Str("key", job.IngestPath).Msg("failed to delete from ingest")
+		}
 	}
 
 	w.logger.Info().
@@ -420,6 +437,28 @@ func (w *Worker) downloadFile(ctx context.Context, key string, destDir string) (
 	return localPath, nil
 }
 
+// downloadFromMedia downloads a file from the media bucket (archive) to local storage
+func (w *Worker) downloadFromMedia(ctx context.Context, key string, destDir string) (string, error) {
+	reader, err := w.s3Client.DownloadFromMedia(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	defer reader.Close()
+
+	localPath := filepath.Join(destDir, filepath.Base(key))
+	file, err := os.Create(localPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to create local file: %w", err)
+	}
+	defer file.Close()
+
+	if _, err := io.Copy(file, reader); err != nil {
+		return "", fmt.Errorf("failed to download file from media bucket: %w", err)
+	}
+
+	return localPath, nil
+}
+
 // uploadProcessedFile uploads a processed file to the media bucket
 // Uses FPutObject internally which handles multipart uploads for large files
 func (w *Worker) uploadProcessedFile(ctx context.Context, localPath, prefix string) (string, error) {
@@ -456,11 +495,21 @@ func (w *Worker) handleJobError(ctx context.Context, job *models.ProcessingJob, 
 		Err(err).
 		Int64("job_id", job.ID).
 		Int("retry_count", job.RetryCount).
+		Bool("is_reprocess", job.IsReprocess).
 		Msg("job failed")
 
 	if markErr := w.jobRepo.MarkFailed(ctx, job.ID, err.Error(), w.cfg.MaxRetries); markErr != nil {
 		w.logger.Error().Err(markErr).Msg("failed to mark job as failed")
 		return markErr
+	}
+
+	// For reprocess jobs, never change media status or notify — media stays "ready"
+	if job.IsReprocess {
+		w.logger.Warn().
+			Int64("job_id", job.ID).
+			Int64("media_id", job.MediaID).
+			Msg("reprocess job failed, media remains at previous version")
+		return err
 	}
 
 	// If we've exceeded max retries, mark media as failed

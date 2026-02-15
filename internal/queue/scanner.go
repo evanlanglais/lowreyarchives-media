@@ -8,6 +8,7 @@ import (
 	"github.com/lowreyarchives/media-processor/internal/config"
 	"github.com/lowreyarchives/media-processor/internal/db"
 	"github.com/lowreyarchives/media-processor/internal/models"
+	"github.com/lowreyarchives/media-processor/internal/processor"
 	"github.com/lowreyarchives/media-processor/internal/storage"
 	"github.com/rs/zerolog"
 )
@@ -74,6 +75,13 @@ func (s *Scanner) scan(ctx context.Context) {
 	// Method 3: Handle stale jobs
 	if err := s.handleStaleJobs(ctx); err != nil {
 		s.logger.Error().Err(err).Msg("failed to handle stale jobs")
+	}
+
+	// Method 4: Scan for media needing reprocessing
+	if s.cfg.ReprocessEnable {
+		if err := s.scanForReprocessing(ctx); err != nil {
+			s.logger.Error().Err(err).Msg("failed to scan for reprocessing")
+		}
 	}
 }
 
@@ -198,7 +206,7 @@ func (s *Scanner) createJobForMedia(ctx context.Context, media *models.Media) er
 	}
 
 	// Create the job
-	job := models.NewProcessingJob(media.ID, eventID, jobType, media.MediaURL)
+	job := models.NewProcessingJob(media.ID, eventID, jobType, media.MediaURL, processor.CurrentEngineVersion(jobType))
 	if err := s.jobRepo.Create(ctx, job); err != nil {
 		return err
 	}
@@ -237,10 +245,58 @@ func (s *Scanner) handleStaleJobs(ctx context.Context) error {
 			s.logger.Error().Err(err).Int64("job_id", job.ID).Msg("failed to reset stale job")
 		}
 
-		// Also reset the media status back to pending for consistency
-		if err := s.mediaRepo.UpdateStatus(ctx, job.MediaID, models.MediaStatusPending); err != nil {
-			s.logger.Warn().Err(err).Int64("media_id", job.MediaID).Msg("failed to reset media status")
+		// Reset media status back to pending for consistency, but not for reprocess jobs
+		// (reprocess jobs keep media in "ready" state throughout)
+		if !job.IsReprocess {
+			if err := s.mediaRepo.UpdateStatus(ctx, job.MediaID, models.MediaStatusPending); err != nil {
+				s.logger.Warn().Err(err).Int64("media_id", job.MediaID).Msg("failed to reset media status")
+			}
 		}
+	}
+
+	return nil
+}
+
+// scanForReprocessing finds media processed with outdated engine versions and creates reprocess jobs
+func (s *Scanner) scanForReprocessing(ctx context.Context) error {
+	candidates, err := s.jobRepo.GetMediaNeedingReprocess(
+		ctx,
+		processor.VideoEngineVersion,
+		processor.PhotoEngineVersion,
+		s.cfg.ReprocessBatchSize,
+	)
+	if err != nil {
+		return err
+	}
+
+	if len(candidates) > 0 {
+		s.logger.Info().Int("count", len(candidates)).Msg("found media needing reprocessing")
+	}
+
+	for _, c := range candidates {
+		job := models.NewReprocessingJob(
+			c.MediaID,
+			c.EventID,
+			c.JobType,
+			c.ArchivePath,
+			processor.CurrentEngineVersion(c.JobType),
+		)
+		if err := s.jobRepo.Create(ctx, job); err != nil {
+			s.logger.Error().
+				Err(err).
+				Int64("media_id", c.MediaID).
+				Str("job_type", string(c.JobType)).
+				Int("old_version", c.CurrentVersion).
+				Msg("failed to create reprocess job")
+			continue
+		}
+		s.logger.Info().
+			Int64("job_id", job.ID).
+			Int64("media_id", c.MediaID).
+			Str("job_type", string(c.JobType)).
+			Int("old_version", c.CurrentVersion).
+			Int("new_version", job.EngineVersion).
+			Msg("created reprocess job")
 	}
 
 	return nil

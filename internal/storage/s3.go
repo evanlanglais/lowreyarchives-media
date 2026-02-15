@@ -60,6 +60,15 @@ func (s *S3Client) Download(ctx context.Context, key string) (io.ReadCloser, err
 	return obj, nil
 }
 
+// DownloadFromMedia downloads a file from the media bucket (used for reprocessing from archive)
+func (s *S3Client) DownloadFromMedia(ctx context.Context, key string) (io.ReadCloser, error) {
+	obj, err := s.client.GetObject(ctx, s.mediaBucket, key, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to download %s from media bucket: %w", key, err)
+	}
+	return obj, nil
+}
+
 // UploadToMedia uploads a processed file to the media bucket
 // For large files, use UploadFileToMedia instead which handles multipart automatically
 func (s *S3Client) UploadToMedia(ctx context.Context, key string, body io.Reader, contentType string) error {
