@@ -5,11 +5,11 @@ import "github.com/lowreyarchives/media-processor/internal/models"
 // Engine versions are bumped when processing logic changes materially.
 // Media processed with an older version will be automatically reprocessed.
 const (
-	// VideoEngineVersion 2: improved interlace detection via idet filter
-	VideoEngineVersion = 2
+	// VideoEngineVersion 4: skip transcode for web-ready H.264/MP4 videos
+	VideoEngineVersion = 4
 
-	// PhotoEngineVersion 1: initial release
-	PhotoEngineVersion = 1
+	// PhotoEngineVersion 2: skip optimization for web-ready JPEG photos
+	PhotoEngineVersion = 2
 )
 
 // CurrentEngineVersion returns the current engine version for a given job type.

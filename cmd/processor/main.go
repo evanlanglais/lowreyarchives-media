@@ -90,7 +90,7 @@ func main() {
 	}
 
 	// Create and start scanner
-	scanner := queue.NewScanner(cfg, jobRepo, mediaRepo, s3Client, logger)
+	scanner := queue.NewScanner(cfg, jobRepo, mediaRepo, s3Client, webhookClient, logger)
 	go scanner.Run(ctx)
 
 	// Start health check server

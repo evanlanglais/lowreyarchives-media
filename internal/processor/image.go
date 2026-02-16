@@ -47,6 +47,19 @@ type ImageResult struct {
 	OptimizedPath string     `json:"optimized_path"`
 	ThumbnailPath string     `json:"thumbnail_path"`
 	Info          *ImageInfo `json:"info"`
+	Skipped       bool       `json:"skipped"`
+}
+
+// isImageWebReady checks if an image is already in a web-ready format that
+// doesn't need optimization. The image must be JPEG and within dimension limits.
+func (p *ImageProcessor) isImageWebReady(info *ImageInfo) bool {
+	if info.Format != "jpeg" {
+		return false
+	}
+	if info.Width > p.cfg.ImageMaxWidth || info.Height > p.cfg.ImageMaxHeight {
+		return false
+	}
+	return true
 }
 
 // Process optimizes an image file
@@ -81,16 +94,45 @@ func (p *ImageProcessor) Process(ctx context.Context, inputPath, outputDir strin
 		Str("format", format).
 		Msg("processing image")
 
-	// Generate output paths
 	baseName := strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))
-	outputPath := filepath.Join(outputDir, baseName+"_optimized.jpg")
 	thumbnailPath := filepath.Join(outputDir, baseName+"_thumb.jpg")
+
+	// Check if image is already web-ready (skip optimization)
+	if p.isImageWebReady(info) {
+		p.logger.Info().
+			Str("format", info.Format).
+			Int("width", info.Width).
+			Int("height", info.Height).
+			Msg("image is web-ready, skipping optimization")
+
+		// Still generate thumbnail
+		img, _, err := image.Decode(file)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode image for thumbnail: %w", err)
+		}
+
+		thumbWidth, thumbHeight := p.calculateThumbnailDimensions(info.Width, info.Height)
+		thumb := p.resize(img, thumbWidth, thumbHeight)
+		if err := p.saveJPEG(thumb, thumbnailPath, 80); err != nil {
+			p.logger.Warn().Err(err).Msg("failed to generate thumbnail")
+			thumbnailPath = ""
+		}
+
+		return &ImageResult{
+			ThumbnailPath: thumbnailPath,
+			Info:          info,
+			Skipped:       true,
+		}, nil
+	}
 
 	// Decode the full image
 	img, _, err := image.Decode(file)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode image: %w", err)
 	}
+
+	// Generate output paths
+	outputPath := filepath.Join(outputDir, baseName+"_optimized.jpg")
 
 	// Calculate target dimensions
 	targetWidth, targetHeight := p.calculateTargetDimensions(info.Width, info.Height)

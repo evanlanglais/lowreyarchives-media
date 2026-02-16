@@ -35,7 +35,9 @@ type VideoInfo struct {
 	Duration     float64 `json:"duration"`
 	Bitrate      int64   `json:"bitrate"`
 	Codec        string  `json:"codec"`
+	PixFmt       string  `json:"pix_fmt"`
 	FrameRate    float64 `json:"frame_rate"`
+	Rotation     int     `json:"rotation"`
 	HasAudio     bool    `json:"has_audio"`
 	AudioCodec   string  `json:"audio_codec,omitempty"`
 	IsInterlaced bool    `json:"is_interlaced"`
@@ -47,6 +49,7 @@ type ProcessResult struct {
 	OptimizedPath string     `json:"optimized_path"`
 	ThumbnailPath string     `json:"thumbnail_path"`
 	Info          *VideoInfo `json:"info"`
+	Skipped       bool       `json:"skipped"`
 }
 
 // GetVideoInfo extracts metadata from a video file using ffprobe
@@ -67,12 +70,20 @@ func (p *VideoProcessor) GetVideoInfo(ctx context.Context, inputPath string) (*V
 
 	var probeResult struct {
 		Streams []struct {
-			CodecType  string `json:"codec_type"`
-			CodecName  string `json:"codec_name"`
-			Width      int    `json:"width"`
-			Height     int    `json:"height"`
-			RFrameRate string `json:"r_frame_rate"`
-			FieldOrder string `json:"field_order"` // "progressive", "tt", "bb", "tb", "bt", or empty
+			CodecType    string `json:"codec_type"`
+			CodecName    string `json:"codec_name"`
+			Width        int    `json:"width"`
+			Height       int    `json:"height"`
+			PixFmt       string `json:"pix_fmt"`
+			RFrameRate   string `json:"r_frame_rate"`
+			FieldOrder   string `json:"field_order"` // "progressive", "tt", "bb", "tb", "bt", or empty
+			SideDataList []struct {
+				SideDataType string `json:"side_data_type"`
+				Rotation     int    `json:"rotation"`
+			} `json:"side_data_list"`
+			Tags struct {
+				Rotate string `json:"rotate"`
+			} `json:"tags"`
 		} `json:"streams"`
 		Format struct {
 			Duration string `json:"duration"`
@@ -92,6 +103,7 @@ func (p *VideoProcessor) GetVideoInfo(ctx context.Context, inputPath string) (*V
 			info.Width = stream.Width
 			info.Height = stream.Height
 			info.Codec = stream.CodecName
+			info.PixFmt = stream.PixFmt
 			// Parse frame rate (e.g., "30/1" -> 30.0)
 			if parts := strings.Split(stream.RFrameRate, "/"); len(parts) == 2 {
 				num, _ := strconv.ParseFloat(parts[0], 64)
@@ -100,6 +112,31 @@ func (p *VideoProcessor) GetVideoInfo(ctx context.Context, inputPath string) (*V
 					info.FrameRate = num / den
 				}
 			}
+
+			// Detect rotation from side_data (Display Matrix) or stream tags.
+			// ffprobe reports stored dimensions, not display dimensions, so we
+			// need to swap width/height for 90°/270° rotations. ffmpeg applies
+			// auto-rotation before our filters, so the scale filter must match
+			// the post-rotation frame size.
+			var rotation int
+			for _, sd := range stream.SideDataList {
+				if sd.SideDataType == "Display Matrix" && sd.Rotation != 0 {
+					rotation = sd.Rotation
+				}
+			}
+			if rotation == 0 && stream.Tags.Rotate != "" {
+				rotation, _ = strconv.Atoi(stream.Tags.Rotate)
+			}
+			info.Rotation = rotation
+
+			absRotation := rotation
+			if absRotation < 0 {
+				absRotation = -absRotation
+			}
+			if absRotation%180 == 90 {
+				info.Width, info.Height = info.Height, info.Width
+			}
+
 			// Check for interlacing - first try metadata
 			info.FieldOrder = stream.FieldOrder
 			info.IsInterlaced = isInterlacedFieldOrder(stream.FieldOrder)
@@ -246,6 +283,35 @@ func extractIdetCount(line, label string) int {
 	return val
 }
 
+// isVideoWebReady checks if a video is already in a web-ready format that
+// doesn't need transcoding. All criteria must be true: H.264 codec, MP4
+// container, dimensions within limits (orientation-agnostic), not interlaced,
+// and yuv420p pixel format for broad browser compatibility.
+func (p *VideoProcessor) isVideoWebReady(info *VideoInfo, inputPath string) bool {
+	if info.Codec != "h264" {
+		return false
+	}
+	if strings.ToLower(filepath.Ext(inputPath)) != ".mp4" {
+		return false
+	}
+	// Orientation-agnostic dimension check: both dimensions must fit within
+	// the larger of MaxVideoWidth/MaxVideoHeight
+	maxDim := p.cfg.MaxVideoWidth
+	if p.cfg.MaxVideoHeight > maxDim {
+		maxDim = p.cfg.MaxVideoHeight
+	}
+	if info.Width > maxDim || info.Height > maxDim {
+		return false
+	}
+	if info.IsInterlaced {
+		return false
+	}
+	if info.PixFmt != "yuv420p" {
+		return false
+	}
+	return true
+}
+
 // Process transcodes a video file to an optimized format
 func (p *VideoProcessor) Process(ctx context.Context, inputPath, outputDir string) (*ProcessResult, error) {
 	// Get video info first
@@ -258,15 +324,40 @@ func (p *VideoProcessor) Process(ctx context.Context, inputPath, outputDir strin
 		Str("input", inputPath).
 		Int("width", info.Width).
 		Int("height", info.Height).
+		Int("rotation", info.Rotation).
 		Float64("duration", info.Duration).
 		Bool("interlaced", info.IsInterlaced).
 		Str("field_order", info.FieldOrder).
+		Str("pix_fmt", info.PixFmt).
 		Msg("processing video")
 
-	// Generate output filename with _optimized suffix to ensure uniqueness
 	baseName := strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))
-	outputPath := filepath.Join(outputDir, baseName+"_optimized."+p.cfg.VideoOutputFormat)
 	thumbnailPath := filepath.Join(outputDir, baseName+"_thumb.jpg")
+
+	// Check if video is already web-ready (skip transcode)
+	if p.isVideoWebReady(info, inputPath) {
+		p.logger.Info().
+			Str("codec", info.Codec).
+			Int("width", info.Width).
+			Int("height", info.Height).
+			Str("pix_fmt", info.PixFmt).
+			Msg("video is web-ready, skipping transcode")
+
+		// Still generate thumbnail
+		if err := p.generateThumbnail(ctx, inputPath, thumbnailPath, info.Duration, info.IsInterlaced); err != nil {
+			p.logger.Warn().Err(err).Msg("failed to generate thumbnail, continuing without it")
+			thumbnailPath = ""
+		}
+
+		return &ProcessResult{
+			ThumbnailPath: thumbnailPath,
+			Info:          info,
+			Skipped:       true,
+		}, nil
+	}
+
+	// Generate output filename with _optimized suffix to ensure uniqueness
+	outputPath := filepath.Join(outputDir, baseName+"_optimized."+p.cfg.VideoOutputFormat)
 
 	// Calculate target dimensions (maintain aspect ratio, cap at max)
 	targetWidth, targetHeight := p.calculateTargetDimensions(info.Width, info.Height)

@@ -1,6 +1,11 @@
 package processor
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/lowreyarchives/media-processor/internal/config"
+	"github.com/rs/zerolog"
+)
 
 func TestParseIdetOutput(t *testing.T) {
 	tests := []struct {
@@ -128,6 +133,117 @@ func TestExtractIdetCount(t *testing.T) {
 			got := extractIdetCount(tt.line, tt.label)
 			if got != tt.want {
 				t.Errorf("extractIdetCount() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsVideoWebReady(t *testing.T) {
+	vp := &VideoProcessor{
+		cfg: &config.Config{
+			MaxVideoWidth:  1920,
+			MaxVideoHeight: 1080,
+		},
+		logger: zerolog.Nop(),
+	}
+
+	tests := []struct {
+		name      string
+		info      *VideoInfo
+		inputPath string
+		want      bool
+	}{
+		{
+			name:      "web-ready 1080p landscape",
+			info:      &VideoInfo{Codec: "h264", Width: 1920, Height: 1080, PixFmt: "yuv420p"},
+			inputPath: "/tmp/video.mp4",
+			want:      true,
+		},
+		{
+			name:      "web-ready 720p",
+			info:      &VideoInfo{Codec: "h264", Width: 1280, Height: 720, PixFmt: "yuv420p"},
+			inputPath: "/tmp/video.mp4",
+			want:      true,
+		},
+		{
+			name:      "portrait within limits",
+			info:      &VideoInfo{Codec: "h264", Width: 1080, Height: 1920, PixFmt: "yuv420p"},
+			inputPath: "/tmp/video.mp4",
+			want:      true,
+		},
+		{
+			name:      "wrong codec hevc",
+			info:      &VideoInfo{Codec: "hevc", Width: 1920, Height: 1080, PixFmt: "yuv420p"},
+			inputPath: "/tmp/video.mp4",
+			want:      false,
+		},
+		{
+			name:      "wrong container mov",
+			info:      &VideoInfo{Codec: "h264", Width: 1920, Height: 1080, PixFmt: "yuv420p"},
+			inputPath: "/tmp/video.mov",
+			want:      false,
+		},
+		{
+			name:      "wrong container avi",
+			info:      &VideoInfo{Codec: "h264", Width: 1920, Height: 1080, PixFmt: "yuv420p"},
+			inputPath: "/tmp/video.avi",
+			want:      false,
+		},
+		{
+			name:      "oversized width",
+			info:      &VideoInfo{Codec: "h264", Width: 2560, Height: 1440, PixFmt: "yuv420p"},
+			inputPath: "/tmp/video.mp4",
+			want:      false,
+		},
+		{
+			name:      "oversized portrait",
+			info:      &VideoInfo{Codec: "h264", Width: 1080, Height: 2160, PixFmt: "yuv420p"},
+			inputPath: "/tmp/video.mp4",
+			want:      false,
+		},
+		{
+			name:      "interlaced",
+			info:      &VideoInfo{Codec: "h264", Width: 1920, Height: 1080, IsInterlaced: true, PixFmt: "yuv420p"},
+			inputPath: "/tmp/video.mp4",
+			want:      false,
+		},
+		{
+			name:      "wrong pix_fmt yuv422p",
+			info:      &VideoInfo{Codec: "h264", Width: 1920, Height: 1080, PixFmt: "yuv422p"},
+			inputPath: "/tmp/video.mp4",
+			want:      false,
+		},
+		{
+			name:      "wrong pix_fmt yuv420p10le",
+			info:      &VideoInfo{Codec: "h264", Width: 1920, Height: 1080, PixFmt: "yuv420p10le"},
+			inputPath: "/tmp/video.mp4",
+			want:      false,
+		},
+		{
+			name:      "all wrong",
+			info:      &VideoInfo{Codec: "hevc", Width: 3840, Height: 2160, IsInterlaced: true, PixFmt: "yuv422p"},
+			inputPath: "/tmp/video.mov",
+			want:      false,
+		},
+		{
+			name:      "small video",
+			info:      &VideoInfo{Codec: "h264", Width: 640, Height: 480, PixFmt: "yuv420p"},
+			inputPath: "/tmp/video.mp4",
+			want:      true,
+		},
+		{
+			name:      "uppercase extension",
+			info:      &VideoInfo{Codec: "h264", Width: 1920, Height: 1080, PixFmt: "yuv420p"},
+			inputPath: "/tmp/video.MP4",
+			want:      true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := vp.isVideoWebReady(tt.info, tt.inputPath)
+			if got != tt.want {
+				t.Errorf("isVideoWebReady() = %v, want %v", got, tt.want)
 			}
 		})
 	}

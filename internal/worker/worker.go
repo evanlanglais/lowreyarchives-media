@@ -194,6 +194,7 @@ func (w *Worker) processJob(ctx context.Context, job *models.ProcessingJob, jobD
 	var width, height int
 	var duration float64
 	var mimeType string
+	var skipped bool
 
 	switch job.JobType {
 	case models.JobTypeVideo:
@@ -204,6 +205,7 @@ func (w *Worker) processJob(ctx context.Context, job *models.ProcessingJob, jobD
 		optimizedPath = result.OptimizedPath
 		thumbnailPath = result.ThumbnailPath
 		processingDetails = result.Info
+		skipped = result.Skipped
 		if result.Info != nil {
 			width = result.Info.Width
 			height = result.Info.Height
@@ -219,6 +221,7 @@ func (w *Worker) processJob(ctx context.Context, job *models.ProcessingJob, jobD
 		optimizedPath = result.OptimizedPath
 		thumbnailPath = result.ThumbnailPath
 		processingDetails = result.Info
+		skipped = result.Skipped
 		if result.Info != nil {
 			width = result.Info.Width
 			height = result.Info.Height
@@ -227,14 +230,6 @@ func (w *Worker) processJob(ctx context.Context, job *models.ProcessingJob, jobD
 
 	default:
 		return fmt.Errorf("unknown job type: %s", job.JobType)
-	}
-
-	// Get optimized file size
-	var optimizedFileSize int64
-	if optimizedPath != "" {
-		if info, err := os.Stat(optimizedPath); err == nil {
-			optimizedFileSize = info.Size()
-		}
 	}
 
 	// Get thumbnail file size
@@ -256,58 +251,117 @@ func (w *Worker) processJob(ctx context.Context, job *models.ProcessingJob, jobD
 		}
 	}
 
-	// Step 4: Upload optimized file to media bucket
-	optimizedS3Key, err := w.uploadProcessedFile(ctx, optimizedPath, "optimized")
-	if err != nil {
-		return fmt.Errorf("upload optimized failed: %w", err)
-	}
-
-	// Step 5: Upload thumbnail if exists
-	var thumbnailS3Key string
-	if thumbnailPath != "" {
-		thumbnailS3Key, err = w.uploadProcessedFile(ctx, thumbnailPath, "thumbnails")
-		if err != nil {
-			w.logger.Warn().Err(err).Msg("failed to upload thumbnail, continuing")
-		}
-	}
-
-	// Step 6: Insert media variants
+	// Branch based on whether optimization was skipped
 	mediaBucket := w.s3Client.GetMediaBucket()
-	variants := w.buildMediaVariants(
-		job.MediaID, mediaBucket,
-		archivePath, optimizedS3Key, thumbnailS3Key,
-		originalFileSize, optimizedFileSize, thumbnailFileSize,
-		width, height, duration, mimeType,
-	)
-
-	if err := w.variantRepo.UpsertMediaVariants(ctx, variants); err != nil {
-		w.logger.Error().Err(err).Int64("media_id", job.MediaID).Msg("failed to upsert media variants")
-		// Don't fail the job for variant insert errors - the core processing succeeded
-	} else {
-		w.logger.Info().Int64("media_id", job.MediaID).Int("variant_count", len(variants)).Msg("inserted media variants")
-	}
-
-	// Step 7: Update media entry with new URL
 	mediaType := models.MediaTypeBucketVideo
 	if job.JobType == models.JobTypePhoto {
 		mediaType = models.MediaTypeBucketPhoto
 	}
-	if err := w.mediaRepo.UpdateMediaURL(ctx, job.MediaID, optimizedS3Key, mediaType); err != nil {
-		return fmt.Errorf("failed to update media: %w", err)
-	}
 
-	// Step 8: Mark job as completed
-	detailsJSON, _ := json.Marshal(processingDetails)
-	detailsStr := string(detailsJSON)
-	job.ArchivePath = &archivePath
-	job.OptimizedPath = &optimizedS3Key
-	if thumbnailS3Key != "" {
-		job.ThumbnailPath = &thumbnailS3Key
-	}
-	job.ProcessingDetails = &detailsStr
+	if skipped {
+		// Optimization was skipped — the archive copy IS the serving source
+		w.logger.Info().
+			Str("archive", archivePath).
+			Msg("optimization skipped, serving archive directly")
 
-	if err := w.jobRepo.MarkCompleted(ctx, job); err != nil {
-		return fmt.Errorf("failed to mark completed: %w", err)
+		// Upload thumbnail if exists
+		var thumbnailS3Key string
+		if thumbnailPath != "" {
+			thumbnailS3Key, err = w.uploadProcessedFile(ctx, thumbnailPath, "thumbnails")
+			if err != nil {
+				w.logger.Warn().Err(err).Msg("failed to upload thumbnail, continuing")
+			}
+		}
+
+		// Build variants: original + thumbnail only (no optimized)
+		variants := w.buildMediaVariants(
+			job.MediaID, mediaBucket,
+			archivePath, "", thumbnailS3Key,
+			originalFileSize, 0, thumbnailFileSize,
+			width, height, duration, mimeType,
+		)
+
+		if err := w.variantRepo.UpsertMediaVariants(ctx, variants); err != nil {
+			w.logger.Error().Err(err).Int64("media_id", job.MediaID).Msg("failed to upsert media variants")
+		} else {
+			w.logger.Info().Int64("media_id", job.MediaID).Int("variant_count", len(variants)).Msg("inserted media variants")
+		}
+
+		// Point media_url to the archive path (the archive IS the streaming source)
+		if err := w.mediaRepo.UpdateMediaURL(ctx, job.MediaID, archivePath, mediaType); err != nil {
+			return fmt.Errorf("failed to update media: %w", err)
+		}
+
+		// Mark job as completed
+		detailsJSON, _ := json.Marshal(processingDetails)
+		detailsStr := string(detailsJSON)
+		job.ArchivePath = &archivePath
+		// job.OptimizedPath stays nil — no optimized variant
+		if thumbnailS3Key != "" {
+			job.ThumbnailPath = &thumbnailS3Key
+		}
+		job.ProcessingDetails = &detailsStr
+
+		if err := w.jobRepo.MarkCompleted(ctx, job); err != nil {
+			return fmt.Errorf("failed to mark completed: %w", err)
+		}
+	} else {
+		// Normal path — upload optimized file
+		// Get optimized file size
+		var optimizedFileSize int64
+		if optimizedPath != "" {
+			if info, err := os.Stat(optimizedPath); err == nil {
+				optimizedFileSize = info.Size()
+			}
+		}
+
+		// Step 4: Upload optimized file to media bucket
+		optimizedS3Key, err := w.uploadProcessedFile(ctx, optimizedPath, "optimized")
+		if err != nil {
+			return fmt.Errorf("upload optimized failed: %w", err)
+		}
+
+		// Step 5: Upload thumbnail if exists
+		var thumbnailS3Key string
+		if thumbnailPath != "" {
+			thumbnailS3Key, err = w.uploadProcessedFile(ctx, thumbnailPath, "thumbnails")
+			if err != nil {
+				w.logger.Warn().Err(err).Msg("failed to upload thumbnail, continuing")
+			}
+		}
+
+		// Step 6: Insert media variants
+		variants := w.buildMediaVariants(
+			job.MediaID, mediaBucket,
+			archivePath, optimizedS3Key, thumbnailS3Key,
+			originalFileSize, optimizedFileSize, thumbnailFileSize,
+			width, height, duration, mimeType,
+		)
+
+		if err := w.variantRepo.UpsertMediaVariants(ctx, variants); err != nil {
+			w.logger.Error().Err(err).Int64("media_id", job.MediaID).Msg("failed to upsert media variants")
+		} else {
+			w.logger.Info().Int64("media_id", job.MediaID).Int("variant_count", len(variants)).Msg("inserted media variants")
+		}
+
+		// Step 7: Update media entry with new URL
+		if err := w.mediaRepo.UpdateMediaURL(ctx, job.MediaID, optimizedS3Key, mediaType); err != nil {
+			return fmt.Errorf("failed to update media: %w", err)
+		}
+
+		// Step 8: Mark job as completed
+		detailsJSON, _ := json.Marshal(processingDetails)
+		detailsStr := string(detailsJSON)
+		job.ArchivePath = &archivePath
+		job.OptimizedPath = &optimizedS3Key
+		if thumbnailS3Key != "" {
+			job.ThumbnailPath = &thumbnailS3Key
+		}
+		job.ProcessingDetails = &detailsStr
+
+		if err := w.jobRepo.MarkCompleted(ctx, job); err != nil {
+			return fmt.Errorf("failed to mark completed: %w", err)
+		}
 	}
 
 	// Notify frontend of media ready status
@@ -322,7 +376,7 @@ func (w *Worker) processJob(ctx context.Context, job *models.ProcessingJob, jobD
 
 	w.logger.Info().
 		Int64("job_id", job.ID).
-		Str("optimized", optimizedS3Key).
+		Bool("skipped", skipped).
 		Str("archive", archivePath).
 		Msg("job completed successfully")
 

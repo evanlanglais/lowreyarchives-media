@@ -10,16 +10,18 @@ import (
 	"github.com/lowreyarchives/media-processor/internal/models"
 	"github.com/lowreyarchives/media-processor/internal/processor"
 	"github.com/lowreyarchives/media-processor/internal/storage"
+	"github.com/lowreyarchives/media-processor/internal/webhook"
 	"github.com/rs/zerolog"
 )
 
 // Scanner watches for new media that needs processing and creates jobs
 type Scanner struct {
-	cfg       *config.Config
-	jobRepo   *db.JobRepository
-	mediaRepo *db.MediaRepository
-	s3Client  *storage.S3Client
-	logger    zerolog.Logger
+	cfg           *config.Config
+	jobRepo       *db.JobRepository
+	mediaRepo     *db.MediaRepository
+	s3Client      *storage.S3Client
+	webhookClient *webhook.Client
+	logger        zerolog.Logger
 }
 
 // NewScanner creates a new media scanner
@@ -28,14 +30,16 @@ func NewScanner(
 	jobRepo *db.JobRepository,
 	mediaRepo *db.MediaRepository,
 	s3Client *storage.S3Client,
+	webhookClient *webhook.Client,
 	logger zerolog.Logger,
 ) *Scanner {
 	return &Scanner{
-		cfg:       cfg,
-		jobRepo:   jobRepo,
-		mediaRepo: mediaRepo,
-		s3Client:  s3Client,
-		logger:    logger.With().Str("component", "scanner").Logger(),
+		cfg:           cfg,
+		jobRepo:       jobRepo,
+		mediaRepo:     mediaRepo,
+		s3Client:      s3Client,
+		webhookClient: webhookClient,
+		logger:        logger.With().Str("component", "scanner").Logger(),
 	}
 }
 
@@ -251,6 +255,7 @@ func (s *Scanner) handleStaleJobs(ctx context.Context) error {
 			if err := s.mediaRepo.UpdateStatus(ctx, job.MediaID, models.MediaStatusPending); err != nil {
 				s.logger.Warn().Err(err).Int64("media_id", job.MediaID).Msg("failed to reset media status")
 			}
+			s.webhookClient.NotifyMediaProcessed(ctx, job.MediaID, job.EventID, "pending")
 		}
 	}
 
