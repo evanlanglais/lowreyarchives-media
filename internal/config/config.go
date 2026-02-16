@@ -65,6 +65,14 @@ type Config struct {
 	ReprocessEnable    bool `envconfig:"REPROCESS_ENABLE" default:"true"`
 	ReprocessBatchSize int  `envconfig:"REPROCESS_BATCH_SIZE" default:"5"`
 
+	// Consistency Check Configuration
+	ConsistencyEnable      bool `envconfig:"CONSISTENCY_ENABLE" default:"false"`
+	ConsistencyIntervalSec int  `envconfig:"CONSISTENCY_INTERVAL_SEC" default:"3600"`
+	ConsistencyDryRun      bool `envconfig:"CONSISTENCY_DRY_RUN" default:"true"`
+	ConsistencyGraceAgeSec int  `envconfig:"CONSISTENCY_GRACE_AGE_SEC" default:"7200"`
+	ConsistencyBatchSize   int  `envconfig:"CONSISTENCY_BATCH_SIZE" default:"100"`
+	ConsistencyFullScan    bool `envconfig:"CONSISTENCY_FULL_SCAN" default:"true"`
+
 	// Cache Invalidation Webhook
 	// Called when media status changes to notify the frontend to invalidate caches
 	WebhookURL     string `envconfig:"WEBHOOK_URL" default:""`

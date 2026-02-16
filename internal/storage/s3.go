@@ -222,6 +222,62 @@ type ObjectInfo struct {
 	ETag        string
 }
 
+// MediaObject represents an object in the media bucket with metadata
+type MediaObject struct {
+	Key          string
+	Size         int64
+	LastModified time.Time
+	Err          error
+}
+
+// ListMediaObjects streams objects from the media bucket under the given prefix.
+// Returns a channel for memory efficiency when listing large buckets.
+func (s *S3Client) ListMediaObjects(ctx context.Context, prefix string) <-chan MediaObject {
+	ch := make(chan MediaObject, 100)
+	go func() {
+		defer close(ch)
+		objectCh := s.client.ListObjects(ctx, s.mediaBucket, minio.ListObjectsOptions{
+			Prefix:    prefix,
+			Recursive: true,
+		})
+		for obj := range objectCh {
+			if obj.Err != nil {
+				ch <- MediaObject{Err: fmt.Errorf("failed to list media objects: %w", obj.Err)}
+				return
+			}
+			ch <- MediaObject{
+				Key:          obj.Key,
+				Size:         obj.Size,
+				LastModified: obj.LastModified,
+			}
+		}
+	}()
+	return ch
+}
+
+// DeleteFromMedia deletes a file from the media bucket
+func (s *S3Client) DeleteFromMedia(ctx context.Context, key string) error {
+	err := s.client.RemoveObject(ctx, s.mediaBucket, key, minio.RemoveObjectOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to delete from media: %w", err)
+	}
+	return nil
+}
+
+// ObjectExistsInMedia checks if an object exists in the media bucket via HEAD request.
+// Returns false on NoSuchKey errors.
+func (s *S3Client) ObjectExistsInMedia(ctx context.Context, key string) (bool, error) {
+	_, err := s.client.StatObject(ctx, s.mediaBucket, key, minio.StatObjectOptions{})
+	if err != nil {
+		errResp := minio.ToErrorResponse(err)
+		if errResp.Code == "NoSuchKey" {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to check object existence: %w", err)
+	}
+	return true, nil
+}
+
 // GetMediaBucket returns the media bucket name
 func (s *S3Client) GetMediaBucket() string {
 	return s.mediaBucket

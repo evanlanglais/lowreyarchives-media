@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/lowreyarchives/media-processor/internal/config"
+	"github.com/lowreyarchives/media-processor/internal/consistency"
 	"github.com/lowreyarchives/media-processor/internal/db"
 	"github.com/lowreyarchives/media-processor/internal/models"
 	"github.com/lowreyarchives/media-processor/internal/processor"
@@ -16,12 +17,14 @@ import (
 
 // Scanner watches for new media that needs processing and creates jobs
 type Scanner struct {
-	cfg           *config.Config
-	jobRepo       *db.JobRepository
-	mediaRepo     *db.MediaRepository
-	s3Client      *storage.S3Client
-	webhookClient *webhook.Client
-	logger        zerolog.Logger
+	cfg                  *config.Config
+	jobRepo              *db.JobRepository
+	mediaRepo            *db.MediaRepository
+	s3Client             *storage.S3Client
+	webhookClient        *webhook.Client
+	logger               zerolog.Logger
+	checker              *consistency.Checker
+	lastConsistencyCheck time.Time
 }
 
 // NewScanner creates a new media scanner
@@ -29,17 +32,24 @@ func NewScanner(
 	cfg *config.Config,
 	jobRepo *db.JobRepository,
 	mediaRepo *db.MediaRepository,
+	variantRepo *db.VariantRepository,
 	s3Client *storage.S3Client,
 	webhookClient *webhook.Client,
 	logger zerolog.Logger,
 ) *Scanner {
+	scannerLogger := logger.With().Str("component", "scanner").Logger()
+	var checker *consistency.Checker
+	if cfg.ConsistencyEnable {
+		checker = consistency.NewChecker(cfg, mediaRepo, variantRepo, s3Client, logger)
+	}
 	return &Scanner{
 		cfg:           cfg,
 		jobRepo:       jobRepo,
 		mediaRepo:     mediaRepo,
 		s3Client:      s3Client,
 		webhookClient: webhookClient,
-		logger:        logger.With().Str("component", "scanner").Logger(),
+		logger:        scannerLogger,
+		checker:       checker,
 	}
 }
 
@@ -85,6 +95,26 @@ func (s *Scanner) scan(ctx context.Context) {
 	if s.cfg.ReprocessEnable {
 		if err := s.scanForReprocessing(ctx); err != nil {
 			s.logger.Error().Err(err).Msg("failed to scan for reprocessing")
+		}
+	}
+
+	// Method 5: Run consistency checks on a separate (slower) interval
+	if s.checker != nil {
+		interval := time.Duration(s.cfg.ConsistencyIntervalSec) * time.Second
+		if time.Since(s.lastConsistencyCheck) >= interval {
+			s.lastConsistencyCheck = time.Now()
+			results, err := s.checker.Run(ctx)
+			if err != nil {
+				s.logger.Error().Err(err).Msg("consistency check failed")
+			}
+			for _, r := range results {
+				s.logger.Info().
+					Str("check", r.Check).
+					Int("found", r.OrphansFound).
+					Int("removed", r.OrphansRemoved).
+					Int("errors", r.Errors).
+					Msg("consistency check result")
+			}
 		}
 	}
 }

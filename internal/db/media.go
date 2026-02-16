@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/lowreyarchives/media-processor/internal/models"
@@ -123,4 +124,50 @@ func (r *MediaRepository) ExistsWithIngestPath(ctx context.Context, ingestPath s
 		return false, fmt.Errorf("failed to check media existence: %w", err)
 	}
 	return exists, nil
+}
+
+// GetOrphanedMedia returns media with status 'ready', created before the grace period,
+// that have no row in the "event-media" junction table.
+func (r *MediaRepository) GetOrphanedMedia(ctx context.Context, gracePeriod time.Duration, limit int) ([]*models.Media, error) {
+	cutoff := time.Now().Add(-gracePeriod)
+	query := `
+		SELECT m.id, m.media_url, m.media_type, m.description, m.status, m.created_at, m.created_by
+		FROM media m
+		WHERE m.status = 'ready'
+		AND m.created_at < $1
+		AND NOT EXISTS (
+			SELECT 1 FROM "event-media" em WHERE em.media_id = m.id
+		)
+		ORDER BY m.id
+		LIMIT $2`
+
+	rows, err := r.db.pool.Query(ctx, query, cutoff, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get orphaned media: %w", err)
+	}
+	defer rows.Close()
+
+	var mediaList []*models.Media
+	for rows.Next() {
+		media := &models.Media{}
+		err := rows.Scan(
+			&media.ID, &media.MediaURL, &media.MediaType,
+			&media.Description, &media.Status, &media.CreatedAt, &media.CreatedBy,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan orphaned media: %w", err)
+		}
+		mediaList = append(mediaList, media)
+	}
+	return mediaList, nil
+}
+
+// DeleteMedia deletes a media row by ID.
+// Cascade deletes handle processing_jobs; variants should be deleted explicitly first.
+func (r *MediaRepository) DeleteMedia(ctx context.Context, mediaID int64) error {
+	_, err := r.db.pool.Exec(ctx, `DELETE FROM media WHERE id = $1`, mediaID)
+	if err != nil {
+		return fmt.Errorf("failed to delete media: %w", err)
+	}
+	return nil
 }

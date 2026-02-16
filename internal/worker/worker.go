@@ -287,6 +287,26 @@ func (w *Worker) processJob(ctx context.Context, job *models.ProcessingJob, jobD
 			w.logger.Info().Int64("media_id", job.MediaID).Int("variant_count", len(variants)).Msg("inserted media variants")
 		}
 
+		// Clean up any stale optimized variant left over from a previous processing run.
+		// When a reprocess decides the file is web-ready, the optimized copy is no longer needed.
+		existingVariants, err := w.variantRepo.GetVariantsForMedia(ctx, job.MediaID)
+		if err != nil {
+			w.logger.Warn().Err(err).Int64("media_id", job.MediaID).Msg("failed to fetch existing variants for cleanup")
+		} else {
+			for _, v := range existingVariants {
+				if v.VariantType == models.VariantTypeOptimized {
+					if delErr := w.s3Client.DeleteFromMedia(ctx, v.StoragePath); delErr != nil {
+						w.logger.Warn().Err(delErr).Str("path", v.StoragePath).Msg("failed to delete stale optimized S3 object")
+					}
+					if delErr := w.variantRepo.DeleteVariantByID(ctx, v.ID); delErr != nil {
+						w.logger.Warn().Err(delErr).Int64("variant_id", v.ID).Msg("failed to delete stale optimized variant row")
+					} else {
+						w.logger.Info().Int64("variant_id", v.ID).Str("path", v.StoragePath).Msg("cleaned up stale optimized variant")
+					}
+				}
+			}
+		}
+
 		// Point media_url to the archive path (the archive IS the streaming source)
 		if err := w.mediaRepo.UpdateMediaURL(ctx, job.MediaID, archivePath, mediaType); err != nil {
 			return fmt.Errorf("failed to update media: %w", err)

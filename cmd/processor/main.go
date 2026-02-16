@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"net/http"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/lowreyarchives/media-processor/internal/config"
+	"github.com/lowreyarchives/media-processor/internal/consistency"
 	"github.com/lowreyarchives/media-processor/internal/db"
 	"github.com/lowreyarchives/media-processor/internal/queue"
 	"github.com/lowreyarchives/media-processor/internal/storage"
@@ -19,6 +21,10 @@ import (
 )
 
 func main() {
+	// Parse CLI flags
+	consistencyCheck := flag.Bool("consistency-check", false, "Run consistency check once and exit")
+	flag.Parse()
+
 	// Initialize logger
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
 	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
@@ -36,20 +42,9 @@ func main() {
 	}
 	zerolog.SetGlobalLevel(level)
 
-	logger.Info().
-		Int("worker_count", cfg.WorkerCount).
-		Str("s3_endpoint", cfg.S3Endpoint).
-		Str("ingest_bucket", cfg.S3IngestBucket).
-		Str("media_bucket", cfg.S3MediaBucket).
-		Msg("starting media processor")
-
 	// Create context with cancellation
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	// Handle shutdown signals
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	// Initialize database connection
 	database, err := db.New(ctx, cfg)
@@ -75,6 +70,36 @@ func main() {
 	mediaRepo := db.NewMediaRepository(database)
 	variantRepo := db.NewVariantRepository(database)
 
+	// Ad-hoc consistency check mode
+	if *consistencyCheck {
+		logger.Info().Bool("dry_run", cfg.ConsistencyDryRun).Msg("running ad-hoc consistency check")
+		checker := consistency.NewChecker(cfg, mediaRepo, variantRepo, s3Client, logger)
+		results, err := checker.Run(ctx)
+		if err != nil {
+			logger.Fatal().Err(err).Msg("consistency check failed")
+		}
+		for _, r := range results {
+			logger.Info().
+				Str("check", r.Check).
+				Int("found", r.OrphansFound).
+				Int("removed", r.OrphansRemoved).
+				Int("errors", r.Errors).
+				Msg("consistency check result")
+		}
+		return
+	}
+
+	logger.Info().
+		Int("worker_count", cfg.WorkerCount).
+		Str("s3_endpoint", cfg.S3Endpoint).
+		Str("ingest_bucket", cfg.S3IngestBucket).
+		Str("media_bucket", cfg.S3MediaBucket).
+		Msg("starting media processor")
+
+	// Handle shutdown signals
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
 	// Create webhook client for cache invalidation
 	webhookClient := webhook.NewClient(cfg.WebhookURL, cfg.WebhookToken, cfg.WebhookTimeout, logger)
 	if webhookClient.Enabled() {
@@ -90,7 +115,7 @@ func main() {
 	}
 
 	// Create and start scanner
-	scanner := queue.NewScanner(cfg, jobRepo, mediaRepo, s3Client, webhookClient, logger)
+	scanner := queue.NewScanner(cfg, jobRepo, mediaRepo, variantRepo, s3Client, webhookClient, logger)
 	go scanner.Run(ctx)
 
 	// Start health check server
