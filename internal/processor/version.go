@@ -8,8 +8,8 @@ const (
 	// VideoEngineVersion 4: skip transcode for web-ready H.264/MP4 videos
 	VideoEngineVersion = 4
 
-	// PhotoEngineVersion 2: skip optimization for web-ready JPEG photos
-	PhotoEngineVersion = 2
+	// PhotoEngineVersion 3: fix EXIF orientation handling (iPhone portrait photos)
+	PhotoEngineVersion = 3
 )
 
 // CurrentEngineVersion returns the current engine version for a given job type.

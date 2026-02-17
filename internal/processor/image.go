@@ -1,13 +1,9 @@
 package processor
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"image"
-	"image/jpeg"
-	"image/png"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +14,8 @@ import (
 
 	// Register image formats
 	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	_ "golang.org/x/image/webp"
 )
 
@@ -64,22 +62,19 @@ func (p *ImageProcessor) isImageWebReady(info *ImageInfo) bool {
 
 // Process optimizes an image file
 func (p *ImageProcessor) Process(ctx context.Context, inputPath, outputDir string) (*ImageResult, error) {
-	// Open and decode the image
+	// Open and decode image config (for format detection and dimensions)
 	file, err := os.Open(inputPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open image: %w", err)
 	}
-	defer file.Close()
 
-	// Decode image configuration first (to get dimensions without full decode)
 	imgConfig, format, err := image.DecodeConfig(file)
+	file.Close()
+
 	if err != nil {
-		// Try using ImageMagick for unsupported formats (HEIC, RAW, etc.)
+		// Unsupported format (HEIC, RAW, etc.) — use ImageMagick
 		return p.processWithImageMagick(ctx, inputPath, outputDir)
 	}
-
-	// Reset file pointer
-	file.Seek(0, 0)
 
 	info := &ImageInfo{
 		Width:  imgConfig.Width,
@@ -94,26 +89,28 @@ func (p *ImageProcessor) Process(ctx context.Context, inputPath, outputDir strin
 		Str("format", format).
 		Msg("processing image")
 
-	baseName := strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))
-	thumbnailPath := filepath.Join(outputDir, baseName+"_thumb.jpg")
-
-	// Check if image is already web-ready (skip optimization)
-	if p.isImageWebReady(info) {
+	// Check if image is web-ready AND has correct EXIF orientation.
+	// Images with non-standard orientation need processing even if otherwise web-ready,
+	// because Go's image.Decode (and most web browsers inconsistently) ignores EXIF orientation.
+	if p.isImageWebReady(info) && !p.needsOrientationCorrection(ctx, inputPath) {
 		p.logger.Info().
 			Str("format", info.Format).
 			Int("width", info.Width).
 			Int("height", info.Height).
-			Msg("image is web-ready, skipping optimization")
+			Msg("image is web-ready with correct orientation, skipping optimization")
 
-		// Still generate thumbnail
-		img, _, err := image.Decode(file)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decode image for thumbnail: %w", err)
-		}
+		// Generate thumbnail using ImageMagick for consistency
+		baseName := strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))
+		thumbnailPath := filepath.Join(outputDir, baseName+"_thumb.jpg")
 
-		thumbWidth, thumbHeight := p.calculateThumbnailDimensions(info.Width, info.Height)
-		thumb := p.resize(img, thumbWidth, thumbHeight)
-		if err := p.saveJPEG(thumb, thumbnailPath, 80); err != nil {
+		thumbCmd := exec.CommandContext(ctx, "convert",
+			inputPath,
+			"-thumbnail", "400x400>",
+			"-quality", "80",
+			"-strip",
+			thumbnailPath,
+		)
+		if err := thumbCmd.Run(); err != nil {
 			p.logger.Warn().Err(err).Msg("failed to generate thumbnail")
 			thumbnailPath = ""
 		}
@@ -125,44 +122,25 @@ func (p *ImageProcessor) Process(ctx context.Context, inputPath, outputDir strin
 		}, nil
 	}
 
-	// Decode the full image
-	img, _, err := image.Decode(file)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode image: %w", err)
-	}
-
-	// Generate output paths
-	outputPath := filepath.Join(outputDir, baseName+"_optimized.jpg")
-
-	// Calculate target dimensions
-	targetWidth, targetHeight := p.calculateTargetDimensions(info.Width, info.Height)
-
-	// Resize if needed
-	if targetWidth != info.Width || targetHeight != info.Height {
-		img = p.resize(img, targetWidth, targetHeight)
-	}
-
-	// Save optimized version
-	if err := p.saveJPEG(img, outputPath, p.cfg.ImageQuality); err != nil {
-		return nil, fmt.Errorf("failed to save optimized image: %w", err)
-	}
-
-	// Generate thumbnail
-	thumbWidth, thumbHeight := p.calculateThumbnailDimensions(info.Width, info.Height)
-	thumb := p.resize(img, thumbWidth, thumbHeight)
-	if err := p.saveJPEG(thumb, thumbnailPath, 80); err != nil {
-		p.logger.Warn().Err(err).Msg("failed to generate thumbnail")
-		thumbnailPath = ""
-	}
-
-	return &ImageResult{
-		OptimizedPath: outputPath,
-		ThumbnailPath: thumbnailPath,
-		Info:          info,
-	}, nil
+	// Process through ImageMagick for correct EXIF orientation handling
+	return p.processWithImageMagick(ctx, inputPath, outputDir)
 }
 
-// processWithImageMagick handles formats not supported by Go's image package
+// needsOrientationCorrection checks if an image has a non-standard EXIF orientation
+// that requires auto-orient to display correctly (e.g., iPhone portrait photos).
+func (p *ImageProcessor) needsOrientationCorrection(ctx context.Context, path string) bool {
+	cmd := exec.CommandContext(ctx, "identify", "-format", "%[EXIF:Orientation]", path)
+	output, err := cmd.Output()
+	if err != nil {
+		return false // Can't determine — assume no correction needed
+	}
+	orient := strings.TrimSpace(string(output))
+	// EXIF Orientation 1 = normal; empty/undefined = no EXIF orientation tag = normal
+	// Any other value (3=180°, 6=90°CW, 8=90°CCW, etc.) needs correction
+	return orient != "" && orient != "1" && orient != "undefined"
+}
+
+// processWithImageMagick handles image processing with correct EXIF orientation
 func (p *ImageProcessor) processWithImageMagick(ctx context.Context, inputPath, outputDir string) (*ImageResult, error) {
 	baseName := strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))
 	outputPath := filepath.Join(outputDir, baseName+"_optimized.jpg")
@@ -227,88 +205,3 @@ func (p *ImageProcessor) processWithImageMagick(ctx context.Context, inputPath, 
 	}, nil
 }
 
-// calculateTargetDimensions calculates target dimensions maintaining aspect ratio
-func (p *ImageProcessor) calculateTargetDimensions(width, height int) (int, int) {
-	maxW := p.cfg.ImageMaxWidth
-	maxH := p.cfg.ImageMaxHeight
-
-	if width <= maxW && height <= maxH {
-		return width, height
-	}
-
-	scaleW := float64(maxW) / float64(width)
-	scaleH := float64(maxH) / float64(height)
-	scale := scaleW
-	if scaleH < scaleW {
-		scale = scaleH
-	}
-
-	return int(float64(width) * scale), int(float64(height) * scale)
-}
-
-// calculateThumbnailDimensions calculates thumbnail dimensions
-func (p *ImageProcessor) calculateThumbnailDimensions(width, height int) (int, int) {
-	const maxThumb = 400
-
-	if width <= maxThumb && height <= maxThumb {
-		return width, height
-	}
-
-	scale := float64(maxThumb) / float64(width)
-	if float64(maxThumb)/float64(height) < scale {
-		scale = float64(maxThumb) / float64(height)
-	}
-
-	return int(float64(width) * scale), int(float64(height) * scale)
-}
-
-// resize performs simple nearest-neighbor resizing
-// For production, consider using a proper resizing library like "github.com/nfnt/resize"
-func (p *ImageProcessor) resize(img image.Image, width, height int) image.Image {
-	bounds := img.Bounds()
-	srcW := bounds.Dx()
-	srcH := bounds.Dy()
-
-	dst := image.NewRGBA(image.Rect(0, 0, width, height))
-
-	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
-			srcX := x * srcW / width
-			srcY := y * srcH / height
-			dst.Set(x, y, img.At(bounds.Min.X+srcX, bounds.Min.Y+srcY))
-		}
-	}
-
-	return dst
-}
-
-// saveJPEG saves an image as JPEG with the given quality
-func (p *ImageProcessor) saveJPEG(img image.Image, path string, quality int) error {
-	file, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	return jpeg.Encode(file, img, &jpeg.Options{Quality: quality})
-}
-
-// savePNG saves an image as PNG
-func (p *ImageProcessor) savePNG(img image.Image, path string) error {
-	file, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	return png.Encode(file, img)
-}
-
-// EncodeJPEGToBuffer encodes an image to a JPEG buffer
-func (p *ImageProcessor) EncodeJPEGToBuffer(img image.Image, quality int) (io.Reader, error) {
-	var buf bytes.Buffer
-	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: quality}); err != nil {
-		return nil, err
-	}
-	return &buf, nil
-}

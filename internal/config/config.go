@@ -50,7 +50,7 @@ type Config struct {
 	// Image Processing
 	ImageMaxWidth  int `envconfig:"IMAGE_MAX_WIDTH" default:"2048"`
 	ImageMaxHeight int `envconfig:"IMAGE_MAX_HEIGHT" default:"2048"`
-	ImageQuality   int `envconfig:"IMAGE_QUALITY" default:"85"`
+	ImageQuality   int `envconfig:"IMAGE_QUALITY" default:"95"`
 
 	// Local Processing Directory
 	TempDir string `envconfig:"TEMP_DIR" default:"/tmp/media-processor"`
