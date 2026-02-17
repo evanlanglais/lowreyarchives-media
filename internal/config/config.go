@@ -48,9 +48,11 @@ type Config struct {
 	MaxVideoHeight    int    `envconfig:"MAX_VIDEO_HEIGHT" default:"1080"`
 
 	// Image Processing
-	ImageMaxWidth  int `envconfig:"IMAGE_MAX_WIDTH" default:"2048"`
-	ImageMaxHeight int `envconfig:"IMAGE_MAX_HEIGHT" default:"2048"`
-	ImageQuality   int `envconfig:"IMAGE_QUALITY" default:"95"`
+	MagickConvertPath  string `envconfig:"MAGICK_CONVERT_PATH" default:"convert"`
+	MagickIdentifyPath string `envconfig:"MAGICK_IDENTIFY_PATH" default:"identify"`
+	ImageMaxWidth      int    `envconfig:"IMAGE_MAX_WIDTH" default:"2048"`
+	ImageMaxHeight     int    `envconfig:"IMAGE_MAX_HEIGHT" default:"2048"`
+	ImageQuality       int    `envconfig:"IMAGE_QUALITY" default:"95"`
 
 	// Local Processing Directory
 	TempDir string `envconfig:"TEMP_DIR" default:"/tmp/media-processor"`

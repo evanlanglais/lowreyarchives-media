@@ -103,7 +103,7 @@ func (p *ImageProcessor) Process(ctx context.Context, inputPath, outputDir strin
 		baseName := strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))
 		thumbnailPath := filepath.Join(outputDir, baseName+"_thumb.jpg")
 
-		thumbCmd := exec.CommandContext(ctx, "convert",
+		thumbCmd := exec.CommandContext(ctx, p.cfg.MagickConvertPath,
 			inputPath,
 			"-thumbnail", "400x400>",
 			"-quality", "80",
@@ -129,7 +129,7 @@ func (p *ImageProcessor) Process(ctx context.Context, inputPath, outputDir strin
 // needsOrientationCorrection checks if an image has a non-standard EXIF orientation
 // that requires auto-orient to display correctly (e.g., iPhone portrait photos).
 func (p *ImageProcessor) needsOrientationCorrection(ctx context.Context, path string) bool {
-	cmd := exec.CommandContext(ctx, "identify", "-format", "%[EXIF:Orientation]", path)
+	cmd := exec.CommandContext(ctx, p.cfg.MagickIdentifyPath, "-format", "%[EXIF:Orientation]", path)
 	output, err := cmd.Output()
 	if err != nil {
 		return false // Can't determine — assume no correction needed
@@ -156,7 +156,7 @@ func (p *ImageProcessor) processWithImageMagick(ctx context.Context, inputPath, 
 		outputPath,
 	}
 
-	cmd := exec.CommandContext(ctx, "convert", args...)
+	cmd := exec.CommandContext(ctx, p.cfg.MagickConvertPath, args...)
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("ImageMagick convert failed: %w", err)
 	}
@@ -171,7 +171,7 @@ func (p *ImageProcessor) processWithImageMagick(ctx context.Context, inputPath, 
 		thumbnailPath,
 	}
 
-	thumbCmd := exec.CommandContext(ctx, "convert", thumbArgs...)
+	thumbCmd := exec.CommandContext(ctx, p.cfg.MagickConvertPath, thumbArgs...)
 	if err := thumbCmd.Run(); err != nil {
 		p.logger.Warn().Err(err).Msg("failed to generate thumbnail with ImageMagick")
 		thumbnailPath = ""
