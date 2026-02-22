@@ -72,8 +72,7 @@ func NewWorker(
 func (w *Worker) Run(ctx context.Context) {
 	w.logger.Info().Msg("worker started")
 
-	ticker := time.NewTicker(time.Duration(w.cfg.PollIntervalSec) * time.Second)
-	defer ticker.Stop()
+	pollInterval := time.Duration(w.cfg.PollIntervalSec) * time.Second
 
 	for {
 		select {
@@ -81,25 +80,40 @@ func (w *Worker) Run(ctx context.Context) {
 			w.logger.Info().Msg("worker shutting down")
 			w.cleanup()
 			return
-		case <-ticker.C:
-			if err := w.processNextJob(ctx); err != nil {
-				w.logger.Error().Err(err).Msg("error processing job")
+		default:
+		}
+
+		processed, err := w.processNextJob(ctx)
+		if err != nil {
+			w.logger.Error().Err(err).Msg("error processing job")
+		}
+
+		// If we processed a job, immediately look for the next one.
+		// Only wait the poll interval when the queue is empty.
+		if !processed {
+			select {
+			case <-ctx.Done():
+				w.logger.Info().Msg("worker shutting down")
+				w.cleanup()
+				return
+			case <-time.After(pollInterval):
 			}
 		}
 	}
 }
 
-// processNextJob claims and processes the next available job
-func (w *Worker) processNextJob(ctx context.Context) error {
+// processNextJob claims and processes the next available job.
+// Returns true if a job was processed, false if the queue was empty.
+func (w *Worker) processNextJob(ctx context.Context) (bool, error) {
 	// Try to claim a job
 	job, err := w.jobRepo.ClaimPendingJob(ctx, w.id)
 	if err != nil {
-		return fmt.Errorf("failed to claim job: %w", err)
+		return false, fmt.Errorf("failed to claim job: %w", err)
 	}
 
 	if job == nil {
 		// No jobs available
-		return nil
+		return false, nil
 	}
 
 	w.logger.Info().
@@ -121,7 +135,7 @@ func (w *Worker) processNextJob(ctx context.Context) error {
 	// Create job-specific directory
 	jobDir := filepath.Join(w.workDir, fmt.Sprintf("job-%d", job.ID))
 	if err := os.MkdirAll(jobDir, 0755); err != nil {
-		return w.handleJobError(ctx, job, fmt.Errorf("failed to create job directory: %w", err))
+		return true, w.handleJobError(ctx, job, fmt.Errorf("failed to create job directory: %w", err))
 	}
 	defer os.RemoveAll(jobDir)
 
@@ -138,10 +152,10 @@ func (w *Worker) processNextJob(ctx context.Context) error {
 	<-heartbeatDone
 
 	if err != nil {
-		return w.handleJobError(ctx, job, err)
+		return true, w.handleJobError(ctx, job, err)
 	}
 
-	return nil
+	return true, nil
 }
 
 // sendHeartbeats periodically updates the job's heartbeat timestamp
