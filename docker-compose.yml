@@ -1,0 +1,10 @@
+services:
+  media-processor:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - processing-tmp:/tmp/media-processor
+
+volumes:
+  processing-tmp:
