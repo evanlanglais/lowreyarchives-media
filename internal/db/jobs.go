@@ -292,6 +292,23 @@ func (r *JobRepository) GetMediaNeedingReprocess(ctx context.Context, videoVersi
 	return candidates, nil
 }
 
+// HasInFlightReprocess returns true if any reprocess job is pending, processing, or retrying.
+// Used by the scanner to confirm the reprocess queue is fully drained before
+// pausing further scans for the current engine versions.
+func (r *JobRepository) HasInFlightReprocess(ctx context.Context) (bool, error) {
+	var exists bool
+	err := r.db.pool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM processing_jobs
+			WHERE is_reprocess = true
+			  AND status IN ('pending', 'processing', 'retrying')
+		)`).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("failed to check in-flight reprocess: %w", err)
+	}
+	return exists, nil
+}
+
 // DeleteCompletedJobs removes completed jobs older than the given duration
 func (r *JobRepository) DeleteCompletedJobs(ctx context.Context, olderThan time.Duration) (int64, error) {
 	cutoff := time.Now().Add(-olderThan)

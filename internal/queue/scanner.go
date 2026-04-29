@@ -25,6 +25,12 @@ type Scanner struct {
 	logger               zerolog.Logger
 	checker              *consistency.Checker
 	lastConsistencyCheck time.Time
+
+	// reprocessDrainedFor records the (video, photo) engine versions for which
+	// we've confirmed there is nothing left to reprocess. While these match the
+	// running binary's constants, scanForReprocessing skips the DB scan entirely.
+	// Reset to zero on engine-version change or whenever we create a reprocess job.
+	reprocessDrainedFor struct{ video, photo int }
 }
 
 // NewScanner creates a new media scanner
@@ -292,21 +298,51 @@ func (s *Scanner) handleStaleJobs(ctx context.Context) error {
 	return nil
 }
 
-// scanForReprocessing finds media processed with outdated engine versions and creates reprocess jobs
+// scanForReprocessing finds media processed with outdated engine versions and creates reprocess jobs.
+//
+// To avoid running the (expensive) DISTINCT ON query every poll, the scanner remembers
+// the engine versions for which it has already confirmed the reprocess queue is drained.
+// While the running binary's engine constants match that record, the scan is skipped
+// entirely. The flag resets when versions change (deploy with new engine) or when a
+// reprocess job is created (queue is no longer drained).
 func (s *Scanner) scanForReprocessing(ctx context.Context) error {
+	currentVideo := processor.VideoEngineVersion
+	currentPhoto := processor.PhotoEngineVersion
+
+	// Skip-fast guard: nothing to do if we've already drained for these versions.
+	if s.reprocessDrainedFor.video == currentVideo && s.reprocessDrainedFor.photo == currentPhoto {
+		return nil
+	}
+
 	candidates, err := s.jobRepo.GetMediaNeedingReprocess(
 		ctx,
-		processor.VideoEngineVersion,
-		processor.PhotoEngineVersion,
+		currentVideo,
+		currentPhoto,
 		s.cfg.ReprocessBatchSize,
 	)
 	if err != nil {
 		return err
 	}
 
-	if len(candidates) > 0 {
-		s.logger.Info().Int("count", len(candidates)).Msg("found media needing reprocessing")
+	if len(candidates) == 0 {
+		// No candidates this pass. Confirm there are no reprocess jobs still in flight
+		// from earlier passes before declaring the engine drained.
+		inFlight, err := s.jobRepo.HasInFlightReprocess(ctx)
+		if err != nil {
+			return err
+		}
+		if !inFlight {
+			s.reprocessDrainedFor.video = currentVideo
+			s.reprocessDrainedFor.photo = currentPhoto
+			s.logger.Info().
+				Int("video_engine_version", currentVideo).
+				Int("photo_engine_version", currentPhoto).
+				Msg("reprocess drained for current engine versions; pausing further scans")
+		}
+		return nil
 	}
+
+	s.logger.Info().Int("count", len(candidates)).Msg("found media needing reprocessing")
 
 	for _, c := range candidates {
 		job := models.NewReprocessingJob(
