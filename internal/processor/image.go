@@ -7,15 +7,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/lowreyarchives/media-processor/internal/config"
 	"github.com/rs/zerolog"
 
-	// Register image formats
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
+
+	// Register image formats
 	_ "golang.org/x/image/webp"
 )
 
@@ -89,6 +91,36 @@ func (p *ImageProcessor) Process(ctx context.Context, inputPath, outputDir strin
 		Str("format", format).
 		Msg("processing image")
 
+	// If the image is an animated GIF, keep the original untouched for archive fidelity
+	// and generate a still thumbnail from the first frame.
+	if format == "gif" && p.isAnimatedGIF(ctx, inputPath) {
+		p.logger.Info().
+			Str("input", inputPath).
+			Msg("image is an animated GIF, keeping original and generating thumbnail")
+
+		baseName := strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))
+		thumbnailPath := filepath.Join(outputDir, baseName+"_thumb.jpg")
+
+		thumbCmd := exec.CommandContext(ctx, p.cfg.MagickConvertPath,
+			inputPath+"[0]",
+			"-auto-orient",
+			"-thumbnail", "400x400>",
+			"-quality", "80",
+			"-strip",
+			thumbnailPath,
+		)
+		if err := thumbCmd.Run(); err != nil {
+			p.logger.Warn().Err(err).Msg("failed to generate thumbnail for animated GIF")
+			thumbnailPath = ""
+		}
+
+		return &ImageResult{
+			ThumbnailPath: thumbnailPath,
+			Info:          info,
+			Skipped:       true,
+		}, nil
+	}
+
 	// Check if image is web-ready AND has correct EXIF orientation.
 	// Images with non-standard orientation need processing even if otherwise web-ready,
 	// because Go's image.Decode (and most web browsers inconsistently) ignores EXIF orientation.
@@ -104,7 +136,7 @@ func (p *ImageProcessor) Process(ctx context.Context, inputPath, outputDir strin
 		thumbnailPath := filepath.Join(outputDir, baseName+"_thumb.jpg")
 
 		thumbCmd := exec.CommandContext(ctx, p.cfg.MagickConvertPath,
-			inputPath,
+			inputPath+"[0]",
 			"-thumbnail", "400x400>",
 			"-quality", "80",
 			"-strip",
@@ -126,6 +158,33 @@ func (p *ImageProcessor) Process(ctx context.Context, inputPath, outputDir strin
 	return p.processWithImageMagick(ctx, inputPath, outputDir)
 }
 
+// isAnimatedGIF checks if an image is an animated GIF with multiple frames
+// using ImageMagick identify (frame count > 1).
+func (p *ImageProcessor) isAnimatedGIF(ctx context.Context, path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	if ext != ".gif" {
+		return false
+	}
+
+	cmd := exec.CommandContext(ctx, p.cfg.MagickIdentifyPath, "-format", "%n\n", path)
+	output, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) == 0 || lines[0] == "" {
+		return false
+	}
+
+	count, err := strconv.Atoi(strings.TrimSpace(lines[0]))
+	if err != nil {
+		return false
+	}
+
+	return count > 1
+}
+
 // needsOrientationCorrection checks if an image has a non-standard EXIF orientation
 // that requires auto-orient to display correctly (e.g., iPhone portrait photos).
 func (p *ImageProcessor) needsOrientationCorrection(ctx context.Context, path string) bool {
@@ -143,12 +202,43 @@ func (p *ImageProcessor) needsOrientationCorrection(ctx context.Context, path st
 // processWithImageMagick handles image processing with correct EXIF orientation
 func (p *ImageProcessor) processWithImageMagick(ctx context.Context, inputPath, outputDir string) (*ImageResult, error) {
 	baseName := strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))
-	outputPath := filepath.Join(outputDir, baseName+"_optimized.jpg")
 	thumbnailPath := filepath.Join(outputDir, baseName+"_thumb.jpg")
+
+	// Check if animated GIF: keep original untouched and generate still thumbnail from first frame.
+	if p.isAnimatedGIF(ctx, inputPath) {
+		p.logger.Info().
+			Str("input", inputPath).
+			Msg("image is an animated GIF, keeping original and generating thumbnail")
+
+		thumbCmd := exec.CommandContext(ctx, p.cfg.MagickConvertPath,
+			inputPath+"[0]",
+			"-auto-orient",
+			"-thumbnail", "400x400>",
+			"-quality", "80",
+			"-strip",
+			thumbnailPath,
+		)
+		if err := thumbCmd.Run(); err != nil {
+			p.logger.Warn().Err(err).Msg("failed to generate thumbnail for animated GIF")
+			thumbnailPath = ""
+		}
+
+		return &ImageResult{
+			ThumbnailPath: thumbnailPath,
+			Info:          &ImageInfo{Format: "gif"},
+			Skipped:       true,
+		}, nil
+	}
+
+	outputPath := filepath.Join(outputDir, baseName+"_optimized.jpg")
+
+	// Frame specifier [0] ensures multi-frame images (such as static GIFs or single-frame files)
+	// produce a single output file instead of frame-suffixed files (e.g. name-0.jpg, name-1.jpg).
+	inputWithFrame := inputPath + "[0]"
 
 	// Use ImageMagick convert for the main image
 	args := []string{
-		inputPath,
+		inputWithFrame,
 		"-auto-orient",
 		"-resize", fmt.Sprintf("%dx%d>", p.cfg.ImageMaxWidth, p.cfg.ImageMaxHeight),
 		"-quality", fmt.Sprintf("%d", p.cfg.ImageQuality),
@@ -163,7 +253,7 @@ func (p *ImageProcessor) processWithImageMagick(ctx context.Context, inputPath, 
 
 	// Generate thumbnail
 	thumbArgs := []string{
-		inputPath,
+		inputWithFrame,
 		"-auto-orient",
 		"-thumbnail", "400x400>",
 		"-quality", "80",
@@ -204,4 +294,3 @@ func (p *ImageProcessor) processWithImageMagick(ctx context.Context, inputPath, 
 		},
 	}, nil
 }
-
